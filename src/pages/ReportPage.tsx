@@ -10,12 +10,14 @@ import {
   Printer,
 } from 'lucide-react';
 import {
+  computeFrequencyAnalysis,
   computeValveHysteresisMetrics,
   getLoopTypeLabel,
   identifyProcessModelSummary,
 } from '../core/engine';
 import {
   generateStandaloneHtmlReport,
+  renderReportPsdSvgChart,
   renderReportSvgChart,
   triggerFileDownload,
 } from '../core/reportGenerator';
@@ -280,7 +282,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ runResult, onBackToCompa
                 {runResult.pairResults.map(({ metrics }) => (
                   <tr key={metrics.pairId}>
                     <td className="py-2 px-3 font-bold text-slate-900">
-                      {metrics.actualTag} ↔ {metrics.simTag}
+                      {metrics.actualTag} / {metrics.simTag}
                     </td>
                     <td className="py-2 px-3 font-sans">{getLoopTypeLabel(metrics.loopType)}</td>
                     <td className="py-2 px-3">
@@ -413,7 +415,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ runResult, onBackToCompa
                     return (
                       <tr key={metrics.pairId}>
                         <td className="py-2 px-2.5 font-sans font-semibold text-slate-900">
-                          {metrics.actualTag} ↔ {metrics.simTag}
+                          {metrics.actualTag} / {metrics.simTag}
                         </td>
                         <td className="py-2 px-2.5 text-right">
                           {simMod.apparentGainKp.toFixed(2)} / {actMod.apparentGainKp.toFixed(2)}
@@ -438,59 +440,198 @@ export const ReportPage: React.FC<ReportPageProps> = ({ runResult, onBackToCompa
               </table>
             </div>
           </div>
+
+          {/* 03-C. Fast Fourier Transform (FFT) Power Spectral Density (PSD) & Cyclic Disturbance Source Identification Table */}
+          <div className="pt-3">
+            <h4 className="text-xs font-bold text-slate-800 mb-1.5">
+              附表 03-C：频域快速傅里叶变换 (FFT) 功率谱密度 (PSD) 与循环扰动源识别总表
+            </h4>
+            <p className="text-xs text-slate-500 mb-2">
+              基于 Radix-2 Cooley-Tukey 快速傅里叶变换与 Hann 窗周期图法，计算实测 PV、仿真 PV 与残差序列的单边功率谱密度 (PSD)，定位阀门粘滞极限环、副环谐振及热容周期负荷扰动源。
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 border-y border-slate-200 text-slate-700 font-semibold">
+                    <th className="py-2 px-2.5">配对回路</th>
+                    <th className="py-2 px-2.5 text-right">FFT 点数 (分辨率)</th>
+                    <th className="py-2 px-2.5 text-right">实测主频 f1 (振荡周期)</th>
+                    <th className="py-2 px-2.5 text-right">仿真主频 (振荡周期)</th>
+                    <th className="py-2 px-2.5 text-right">主峰 PSD 功率 (实 / 仿)</th>
+                    <th className="py-2 px-2.5 text-right">频段能量占比 (低 / 中 / 高)</th>
+                    <th className="py-2 px-2.5 text-right">频谱相似度</th>
+                    <th className="py-2 px-2.5">首要循环扰动源识别结论</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 font-mono tabular-nums">
+                  {runResult.pairResults.map(({ metrics, alignedSeries }) => {
+                    const freqRes = computeFrequencyAnalysis(
+                      alignedSeries,
+                      runResult.alignmentOptions.gridSec
+                    );
+                    const topPeak = freqRes.cyclicPeaks[0];
+                    return (
+                      <tr key={metrics.pairId}>
+                        <td className="py-2 px-2.5 font-sans font-semibold text-slate-900">
+                          {metrics.actualTag} / {metrics.simTag}
+                        </td>
+                        <td className="py-2 px-2.5 text-right">
+                          {freqRes.fftSize}pt ({freqRes.freqResolutionHz.toFixed(4)}Hz)
+                        </td>
+                        <td className="py-2 px-2.5 text-right font-semibold text-amber-800">
+                          {freqRes.dominantActFreqHz.toFixed(3)}Hz ({freqRes.dominantActPeriodSec.toFixed(1)}s)
+                        </td>
+                        <td className="py-2 px-2.5 text-right text-blue-700">
+                          {freqRes.dominantSimFreqHz.toFixed(3)}Hz ({freqRes.dominantSimPeriodSec.toFixed(1)}s)
+                        </td>
+                        <td className="py-2 px-2.5 text-right">
+                          {topPeak
+                            ? `${topPeak.actPsd.toFixed(2)} / ${topPeak.simPsd.toFixed(2)}`
+                            : '-'}
+                        </td>
+                        <td className="py-2 px-2.5 text-right">
+                          {freqRes.lowBandEnergyPct}% / {freqRes.midBandEnergyPct}% /{' '}
+                          {freqRes.highBandEnergyPct}%
+                        </td>
+                        <td className="py-2 px-2.5 text-right font-semibold text-emerald-700">
+                          {freqRes.spectralSimilarityPct}%
+                        </td>
+                        <td className="py-2 px-2.5 font-sans text-slate-700">
+                          {freqRes.primaryDisturbanceSource}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </section>
 
-        {/* 5. Embedded Charts Gallery & Top-N Deviation Intervals */}
+        {/* 5. Embedded Charts Gallery, FFT PSD Spectrum & Top-N Deviation Intervals */}
         <section className="space-y-5">
           <h3 className="text-base font-bold text-slate-900 border-b border-slate-200 pb-1.5">
-            04. 对比趋势图集与 Top-N 偏差区间诊断
+            04. 对比趋势图集、FFT 功率谱密度 (PSD) 图谱与循环扰动源 / Top-N 偏差区间诊断
           </h3>
-          {runResult.pairResults.map(({ metrics, alignedSeries, topDeviations }) => (
-            <div key={metrics.pairId} className="p-4 bg-slate-50/70 border border-slate-200 rounded-lg space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-sm font-bold text-slate-900">{metrics.pairName}</h4>
-                <span className="text-xs font-mono text-slate-600">
-                  有效计算时长: {metrics.effectiveDurationSec}s · RMSE: {metrics.rmsePct.toFixed(2)}%
-                </span>
-              </div>
-
+          {runResult.pairResults.map(({ metrics, alignedSeries, topDeviations }) => {
+            const freqRes = computeFrequencyAnalysis(
+              alignedSeries,
+              runResult.alignmentOptions.gridSec
+            );
+            return (
               <div
-                className="w-full overflow-x-auto"
-                dangerouslySetInnerHTML={{ __html: renderReportSvgChart(alignedSeries, metrics) }}
-              />
+                key={metrics.pairId}
+                className="p-4 bg-slate-50/70 border border-slate-200 rounded-lg space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-sm font-bold text-slate-900">{metrics.pairName}</h4>
+                  <span className="text-xs font-mono text-slate-600">
+                    有效时长: {metrics.effectiveDurationSec}s · RMSE: {metrics.rmsePct.toFixed(2)}% ·
+                    实测主周期 T1: {freqRes.dominantActPeriodSec.toFixed(1)}s (f1=
+                    {freqRes.dominantActFreqHz.toFixed(3)}Hz)
+                  </span>
+                </div>
 
-              {/* Top Deviations Sub-table */}
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs text-left border-collapse bg-white">
-                  <thead>
-                    <tr className="bg-slate-100 border-y border-slate-200 text-slate-600">
-                      <th className="py-1.5 px-2.5">Top 偏差排名</th>
-                      <th className="py-1.5 px-2.5">相对时间窗口</th>
-                      <th className="py-1.5 px-2.5 text-right">峰值偏差 (绝对 / %量程)</th>
-                      <th className="py-1.5 px-2.5 text-right">区间局部 RMSE</th>
-                      <th className="py-1.5 px-2.5">工程偏差归因与整定提示</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200 font-mono tabular-nums">
-                    {topDeviations.slice(0, 3).map((d) => (
-                      <tr key={d.rank}>
-                        <td className="py-1.5 px-2.5 font-bold">#{d.rank}</td>
-                        <td className="py-1.5 px-2.5">
-                          T+{d.startSec}s ~ T+{d.endSec}s ({d.durationSec}s)
-                        </td>
-                        <td className="py-1.5 px-2.5 text-right">
-                          {d.peakErrorAbs.toFixed(3)} {metrics.unit} ({d.peakErrorPct >= 0 ? '+' : ''}
-                          {d.peakErrorPct.toFixed(2)}%)
-                        </td>
-                        <td className="py-1.5 px-2.5 text-right">{d.intervalRmsePct.toFixed(2)}%</td>
-                        <td className="py-1.5 px-2.5 font-sans text-slate-700">{d.diagnosticNote}</td>
+                {/* Time-Domain Trend SVG */}
+                <div
+                  className="w-full overflow-x-auto"
+                  dangerouslySetInnerHTML={{
+                    __html: renderReportSvgChart(alignedSeries, metrics),
+                  }}
+                />
+
+                {/* Frequency-Domain Radix-2 FFT PSD SVG */}
+                <div
+                  className="w-full overflow-x-auto"
+                  dangerouslySetInnerHTML={{
+                    __html: renderReportPsdSvgChart(freqRes, metrics),
+                  }}
+                />
+
+                {/* Summary FFT Diagnosis Callout */}
+                <div className="px-3 py-2 bg-amber-50/80 border border-amber-200 rounded text-xs text-slate-800">
+                  <span className="font-bold text-amber-900">频域循环扰动源诊断：</span>
+                  {freqRes.summaryDiagnosis}
+                </div>
+
+                {/* Top-3 Cyclic Disturbance Peaks Sub-table */}
+                {freqRes.cyclicPeaks.length > 0 && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left border-collapse bg-white">
+                      <thead>
+                        <tr className="bg-amber-50/90 border-y border-amber-200 text-slate-700">
+                          <th className="py-1.5 px-2.5">FFT 谱峰排名</th>
+                          <th className="py-1.5 px-2.5">特征频率 / 振荡周期</th>
+                          <th className="py-1.5 px-2.5">频段划分</th>
+                          <th className="py-1.5 px-2.5 text-right">
+                            PSD 功率 (实测 / 仿真 / 幅值比)
+                          </th>
+                          <th className="py-1.5 px-2.5">循环扰动源分类与整定抑制建议</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 font-mono tabular-nums">
+                        {freqRes.cyclicPeaks.map((p) => (
+                          <tr key={p.rank}>
+                            <td className="py-1.5 px-2.5 font-bold text-amber-900">
+                              Peak #{p.rank}
+                            </td>
+                            <td className="py-1.5 px-2.5">
+                              f = {p.freqHz.toFixed(4)} Hz (T = {p.periodSec.toFixed(1)}s)
+                            </td>
+                            <td className="py-1.5 px-2.5 font-sans text-slate-600">{p.bandLabel}</td>
+                            <td className="py-1.5 px-2.5 text-right">
+                              {p.actPsd.toFixed(3)} / {p.simPsd.toFixed(3)} ({p.powerRatioActToSim}
+                              x)
+                            </td>
+                            <td className="py-1.5 px-2.5 font-sans text-slate-700">
+                              <strong className="text-slate-900">{p.disturbanceSource}</strong> —{' '}
+                              {p.engineeringAdvice}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Top Deviations Sub-table */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-left border-collapse bg-white">
+                    <thead>
+                      <tr className="bg-slate-100 border-y border-slate-200 text-slate-600">
+                        <th className="py-1.5 px-2.5">时域偏差排名</th>
+                        <th className="py-1.5 px-2.5">相对时间窗口</th>
+                        <th className="py-1.5 px-2.5 text-right">峰值偏差 (绝对 / %量程)</th>
+                        <th className="py-1.5 px-2.5 text-right">区间局部 RMSE</th>
+                        <th className="py-1.5 px-2.5">工程偏差归因与整定提示</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 font-mono tabular-nums">
+                      {topDeviations.slice(0, 3).map((d) => (
+                        <tr key={d.rank}>
+                          <td className="py-1.5 px-2.5 font-bold">#{d.rank}</td>
+                          <td className="py-1.5 px-2.5">
+                            T+{d.startSec}s ~ T+{d.endSec}s ({d.durationSec}s)
+                          </td>
+                          <td className="py-1.5 px-2.5 text-right">
+                            {d.peakErrorAbs.toFixed(3)} {metrics.unit} (
+                            {d.peakErrorPct >= 0 ? '+' : ''}
+                            {d.peakErrorPct.toFixed(2)}%)
+                          </td>
+                          <td className="py-1.5 px-2.5 text-right">
+                            {d.intervalRmsePct.toFixed(2)}%
+                          </td>
+                          <td className="py-1.5 px-2.5 font-sans text-slate-700">
+                            {d.diagnosticNote}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </section>
 
         {/* 6. Engineering Conclusions & Appendix */}

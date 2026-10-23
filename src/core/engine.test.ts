@@ -5,6 +5,7 @@ import {
   computeCascadeCoupledAnalysis,
   computeClosedLoopStepMetrics,
   computeCrossCorrelationCurve,
+  computeFrequencyAnalysis,
   computeSpectralPsdAnalysis,
   computeValveHysteresisMetrics,
   detectAutoSliceWindows,
@@ -285,7 +286,46 @@ test('V1.1/V2 Capabilities: PSD Frequency Spectrum, Master-Slave Cascade Couplin
   assert.equal(resolvedFromSlave.slaveBundle.pair.id, 'pair_fc_closed');
   assert.equal(resolvedFromSlave.slaveBundle.pair.cascadeRole, 'slave');
   assert.equal(resolvedFromSlave.stackedSeries.length, 400);
+
+  // 5. Test computeFrequencyAnalysis (Radix-2 Cooley-Tukey FFT PSD & Cyclic Disturbance Source Identification)
+  const fftRes = computeFrequencyAnalysis(pairResults[0].alignedSeries, 1);
+  assert.equal(fftRes.fftSize, 512);
+  assert.equal(fftRes.sampleCount, 400);
+  assert.ok(fftRes.spectrum.length > 20);
+  assert.ok(fftRes.cyclicPeaks.length >= 1 && fftRes.cyclicPeaks.length <= 3);
+  assert.ok(
+    Math.abs(fftRes.lowBandEnergyPct + fftRes.midBandEnergyPct + fftRes.highBandEnergyPct - 100) < 0.2
+  );
+  assert.ok(fftRes.spectralSimilarityPct > 0 && fftRes.spectralSimilarityPct <= 100);
+
+  // Verify synthetic cyclic disturbance detection at f = 0.05 Hz (T = 20s)
+  const syntheticSeries = Array.from({ length: 256 }, (_, i) => {
+    const t = i;
+    const simVal = 100;
+    const cyclicDisturbance = 8 * Math.sin((2 * Math.PI * t) / 20); // 20s period = 0.05 Hz
+    const actVal = simVal + cyclicDisturbance;
+    return {
+      t,
+      timestamp: `2026-03-01 00:00:${String(i % 60).padStart(2, '0')}`,
+      simPv: simVal,
+      actPv: actVal,
+      simMv: 50,
+      actMv: 50,
+      simSv: 100,
+      actSv: 100,
+      errorPv: actVal - simVal,
+      errorPvPct: ((actVal - simVal) / 100) * 100,
+      errorMv: 0,
+    };
+  });
+  const synthFft = computeFrequencyAnalysis(syntheticSeries, 1);
+  assert.equal(synthFft.fftSize, 256);
+  assert.ok(Math.abs(synthFft.dominantActFreqHz - 0.05) < 0.006);
+  assert.ok(Math.abs(synthFft.dominantActPeriodSec - 20.0) < 2.5);
+  assert.ok(synthFft.cyclicPeaks[0].actPsd > synthFft.cyclicPeaks[0].simPsd);
+  assert.ok(synthFft.primaryDisturbanceSource.includes('循环振荡'));
 });
+
 
 
 

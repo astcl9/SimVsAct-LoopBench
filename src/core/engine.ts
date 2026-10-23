@@ -2026,6 +2026,419 @@ export function computeSpectralPsdAnalysis(
 
 /**
  * ============================================================================
+ * Fast Fourier Transform (Radix-2 Cooley-Tukey FFT) & Power Spectral Density (PSD)
+ * Cyclic Disturbance Source Identification for Comparison Analysis Reports
+ * ============================================================================
+ */
+export interface FftSpectrumPoint {
+  binIndex: number;
+  freqHz: number;
+  periodSec: number;
+  actPsd: number; // Actual PV PSD (unit^2 / Hz)
+  simPsd: number; // Simulation PV PSD (unit^2 / Hz)
+  errPsd: number; // Residual Error PSD (%span^2 / Hz)
+  amplitudeRatio: number; // sqrt(actPsd / max(1e-9, simPsd))
+}
+
+export interface CyclicDisturbancePeak {
+  rank: number;
+  freqHz: number;
+  periodSec: number;
+  actPsd: number;
+  simPsd: number;
+  errPsd: number;
+  powerRatioActToSim: number;
+  bandLabel: string;
+  disturbanceSource: string;
+  engineeringAdvice: string;
+}
+
+export interface FrequencyAnalysisResult {
+  fftSize: number;
+  sampleCount: number;
+  samplingIntervalSec: number;
+  freqResolutionHz: number;
+  nyquistFreqHz: number;
+  spectrum: FftSpectrumPoint[];
+  dominantActFreqHz: number;
+  dominantActPeriodSec: number;
+  dominantSimFreqHz: number;
+  dominantSimPeriodSec: number;
+  dominantErrFreqHz: number;
+  dominantErrPeriodSec: number;
+  actTotalPower: number;
+  simTotalPower: number;
+  spectralSimilarityPct: number;
+  lowBandEnergyPct: number;
+  midBandEnergyPct: number;
+  highBandEnergyPct: number;
+  cyclicPeaks: CyclicDisturbancePeak[];
+  primaryDisturbanceSource: string;
+  summaryDiagnosis: string;
+}
+
+/**
+ * In-place Radix-2 Decimation-in-Time (DIT) Cooley-Tukey Fast Fourier Transform
+ */
+function radix2CooleyTukeyFft(re: Float64Array, im: Float64Array): void {
+  const n = re.length;
+  if (n <= 1) return;
+
+  // Bit-reversal permutation
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    if (i < j) {
+      const tmpRe = re[i];
+      re[i] = re[j];
+      re[j] = tmpRe;
+      const tmpIm = im[i];
+      im[i] = im[j];
+      im[j] = tmpIm;
+    }
+    let bit = n >> 1;
+    while (bit >= 1 && j >= bit) {
+      j -= bit;
+      bit >>= 1;
+    }
+    j += bit;
+  }
+
+  // Butterfly computation stages
+  for (let len = 2; len <= n; len <<= 1) {
+    const halfLen = len >> 1;
+    const angle = (-2 * Math.PI) / len;
+    const wLenRe = Math.cos(angle);
+    const wLenIm = Math.sin(angle);
+
+    for (let i = 0; i < n; i += len) {
+      let wRe = 1.0;
+      let wIm = 0.0;
+      for (let k = 0; k < halfLen; k++) {
+        const evenIdx = i + k;
+        const oddIdx = i + k + halfLen;
+
+        const uRe = re[evenIdx];
+        const uIm = im[evenIdx];
+        const vRe = re[oddIdx] * wRe - im[oddIdx] * wIm;
+        const vIm = re[oddIdx] * wIm + im[oddIdx] * wRe;
+
+        re[evenIdx] = uRe + vRe;
+        im[evenIdx] = uIm + vIm;
+        re[oddIdx] = uRe - vRe;
+        im[oddIdx] = uIm - vIm;
+
+        const nextWRe = wRe * wLenRe - wIm * wLenIm;
+        wIm = wRe * wLenIm + wIm * wLenRe;
+        wRe = nextWRe;
+      }
+    }
+  }
+}
+
+function classifyCyclicDisturbancePeak(
+  freqHz: number,
+  periodSec: number,
+  actPsd: number,
+  simPsd: number
+): {
+  bandLabel: string;
+  disturbanceSource: string;
+  engineeringAdvice: string;
+} {
+  const ratio = actPsd / Math.max(1e-6, simPsd);
+  if (periodSec <= 10) {
+    return {
+      bandLabel: '高频段 (>=0.10 Hz)',
+      disturbanceSource:
+        ratio > 1.35
+          ? '调节阀填料粘滞 (Stiction) 高频极限环或流量脉动噪声'
+          : '高频传感器测量纹波与数字采样噪声',
+      engineeringAdvice:
+        '建议检查定位器死区与阀门填料摩擦力，或在变送器侧配置 1.5s~2.0s 一阶数字滤波时间常数。',
+    };
+  }
+  if (periodSec <= 35) {
+    return {
+      bandLabel: '中高频控制段 (0.028~0.10 Hz)',
+      disturbanceSource:
+        ratio > 1.25
+          ? '副环比例增益偏强或主副回路谐振耦合引起的循环振荡'
+          : '设定值阶跃引发的闭环特征阻尼振荡模态',
+      engineeringAdvice:
+        '建议将副回路比例带 PB 上调 15%~25%，拉开主副环特征时间常数比 (tau_master/tau_slave >= 3)。',
+    };
+  }
+  if (periodSec <= 110) {
+    return {
+      bandLabel: '中低频扰动段 (0.009~0.028 Hz)',
+      disturbanceSource:
+        ratio > 1.2
+          ? '外部周期性负荷扰动源（精馏塔回流/加热炉燃料压力或换热温差周期波动）'
+          : '主环热容惯性滞后与积分作用共同形成的慢速调节周期',
+      engineeringAdvice:
+        '建议核查上游公用工程蒸汽/燃料压力周期性波动，并适度放宽积分时间 TI 以抑制慢速积分饱和。',
+    };
+  }
+  return {
+    bandLabel: '超低频基波段 (<0.009 Hz)',
+    disturbanceSource: '工艺进料组分慢漂移、环境散热波动或设定值阶跃趋势项能量',
+    engineeringAdvice:
+      '属长周期非平稳工况漂移，建议在仿真侧补充进料负荷前馈或慢变环境温度边界条件。',
+  };
+}
+
+/**
+ * Compute Fast Fourier Transform (FFT) Power Spectral Density (PSD) of actual (`actPv`),
+ * simulation (`simPv`), and residual error (`errorPvPct`) series to identify cyclic disturbance sources.
+ */
+export function computeFrequencyAnalysis(
+  series: AlignedPoint[],
+  gridSec = 1
+): FrequencyAnalysisResult {
+  const n = series.length;
+  const dt = Math.max(0.1, gridSec);
+  const nyquistFreqHz = Number((0.5 / dt).toFixed(4));
+
+  if (n < 8) {
+    return {
+      fftSize: 64,
+      sampleCount: n,
+      samplingIntervalSec: dt,
+      freqResolutionHz: Number((1 / (64 * dt)).toFixed(5)),
+      nyquistFreqHz,
+      spectrum: [],
+      dominantActFreqHz: 0.025,
+      dominantActPeriodSec: 40,
+      dominantSimFreqHz: 0.025,
+      dominantSimPeriodSec: 40,
+      dominantErrFreqHz: 0.025,
+      dominantErrPeriodSec: 40,
+      actTotalPower: 0,
+      simTotalPower: 0,
+      spectralSimilarityPct: 100,
+      lowBandEnergyPct: 50,
+      midBandEnergyPct: 35,
+      highBandEnergyPct: 15,
+      cyclicPeaks: [],
+      primaryDisturbanceSource: '样本点数不足，未检出显著周期性外部扰动源',
+      summaryDiagnosis: '当前对齐窗口样本点少于 8 点，无法执行有效 FFT 功率谱密度分解。',
+    };
+  }
+
+  // Next power of 2 >= max(64, n) for radix-2 Cooley-Tukey FFT
+  let fftSize = 64;
+  while (fftSize < n && fftSize < 4096) {
+    fftSize <<= 1;
+  }
+
+  // Linear + Setpoint-Step detrend helper to suppress DC offset and step-ramp leakage before Hann windowing
+  const detrendAndWindow = (
+    values: number[],
+    referenceSv?: number[]
+  ): { re: Float64Array; im: Float64Array; winNorm: number } => {
+    const len = values.length;
+    // Subtract setpoint step change if provided so step baseline doesn't mask cyclic disturbances
+    const centered = values.map((v, i) => (referenceSv ? v - referenceSv[i] * 0.35 : v));
+
+    let sumX = 0,
+      sumY = 0,
+      sumXY = 0,
+      sumXX = 0;
+    for (let i = 0; i < len; i++) {
+      sumX += i;
+      sumY += centered[i];
+      sumXY += i * centered[i];
+      sumXX += i * i;
+    }
+    const denom = Math.max(1e-9, len * sumXX - sumX * sumX);
+    const slope = (len * sumXY - sumX * sumY) / denom;
+    const intercept = (sumY - slope * sumX) / len;
+
+    const re = new Float64Array(fftSize);
+    const im = new Float64Array(fftSize);
+    let winEnergySum = 0;
+
+    for (let i = 0; i < len; i++) {
+      const detrended = centered[i] - (intercept + slope * i);
+      const w = len > 1 ? 0.5 * (1 - Math.cos((2 * Math.PI * i) / (len - 1))) : 1.0;
+      re[i] = detrended * w;
+      winEnergySum += w * w;
+    }
+
+    const winNorm = Math.max(1e-9, winEnergySum);
+    return { re, im, winNorm };
+  };
+
+  const actSvArr = series.map((p) => p.actSv);
+  const simSvArr = series.map((p) => p.simSv);
+  const actPrep = detrendAndWindow(
+    series.map((p) => p.actPv),
+    actSvArr
+  );
+  const simPrep = detrendAndWindow(
+    series.map((p) => p.simPv),
+    simSvArr
+  );
+  const errPrep = detrendAndWindow(series.map((p) => p.errorPvPct));
+
+  radix2CooleyTukeyFft(actPrep.re, actPrep.im);
+  radix2CooleyTukeyFft(simPrep.re, simPrep.im);
+  radix2CooleyTukeyFft(errPrep.re, errPrep.im);
+
+  const halfBins = fftSize >> 1;
+  const freqResolutionHz = 1 / (fftSize * dt);
+  const scaleFactor = (2 * dt) / actPrep.winNorm;
+
+  const spectrum: FftSpectrumPoint[] = [];
+  let actTotalPower = 0;
+  let simTotalPower = 0;
+  let lowBandPower = 0;
+  let midBandPower = 0;
+  let highBandPower = 0;
+
+  let maxActBin: FftSpectrumPoint | null = null;
+  let maxSimBin: FftSpectrumPoint | null = null;
+  let maxErrBin: FftSpectrumPoint | null = null;
+
+  let dotProduct = 0;
+  let normActSq = 0;
+  let normSimSq = 0;
+
+  // Minimum cyclic frequency: at least ~3 cycles within observation window (or >= 0.008 Hz, T <= 125s)
+  const minCyclicFreqHz = Math.max(freqResolutionHz * 3, 0.008);
+  const maxReportFreqHz = Math.min(nyquistFreqHz, 0.25);
+
+  for (let k = 2; k <= halfBins; k++) {
+    const freqHz = k * freqResolutionHz;
+    if (freqHz < 0.005) continue;
+    if (freqHz > maxReportFreqHz) break;
+
+    const actMagSq = actPrep.re[k] * actPrep.re[k] + actPrep.im[k] * actPrep.im[k];
+    const simMagSq = simPrep.re[k] * simPrep.re[k] + simPrep.im[k] * simPrep.im[k];
+    const errMagSq = errPrep.re[k] * errPrep.re[k] + errPrep.im[k] * errPrep.im[k];
+
+    const actPsd = actMagSq * scaleFactor;
+    const simPsd = simMagSq * scaleFactor;
+    const errPsd = errMagSq * scaleFactor;
+
+    const periodSec = 1 / freqHz;
+    const amplitudeRatio = Math.sqrt(actPsd / Math.max(1e-9, simPsd));
+
+    const pt: FftSpectrumPoint = {
+      binIndex: k,
+      freqHz: Number(freqHz.toFixed(4)),
+      periodSec: Number(periodSec.toFixed(1)),
+      actPsd: Number(actPsd.toFixed(4)),
+      simPsd: Number(simPsd.toFixed(4)),
+      errPsd: Number(errPsd.toFixed(4)),
+      amplitudeRatio: Number(amplitudeRatio.toFixed(3)),
+    };
+    spectrum.push(pt);
+
+    actTotalPower += actPsd * freqResolutionHz;
+    simTotalPower += simPsd * freqResolutionHz;
+
+    if (freqHz < 0.015) lowBandPower += actPsd;
+    else if (freqHz <= 0.1) midBandPower += actPsd;
+    else highBandPower += actPsd;
+
+    dotProduct += actPsd * simPsd;
+    normActSq += actPsd * actPsd;
+    normSimSq += simPsd * simPsd;
+
+    // Pick dominant cyclic oscillation peak in the multi-cycle band (freqHz >= minCyclicFreqHz)
+    if (freqHz >= minCyclicFreqHz) {
+      if (!maxActBin || actPsd > maxActBin.actPsd) maxActBin = pt;
+      if (!maxSimBin || simPsd > maxSimBin.simPsd) maxSimBin = pt;
+      if (!maxErrBin || errPsd > maxErrBin.errPsd) maxErrBin = pt;
+    }
+  }
+
+  const totalBandSum = Math.max(1e-9, lowBandPower + midBandPower + highBandPower);
+  const lowBandEnergyPct = Number(((lowBandPower / totalBandSum) * 100).toFixed(1));
+  const midBandEnergyPct = Number(((midBandPower / totalBandSum) * 100).toFixed(1));
+  const highBandEnergyPct = Number(
+    Math.max(0, 100 - lowBandEnergyPct - midBandEnergyPct).toFixed(1)
+  );
+
+  const cosineSim =
+    normActSq > 1e-12 && normSimSq > 1e-12
+      ? dotProduct / (Math.sqrt(normActSq) * Math.sqrt(normSimSq))
+      : 1.0;
+  const spectralSimilarityPct = Number((Math.min(1, Math.max(0, cosineSim)) * 100).toFixed(1));
+
+  // Identify Top-3 distinct cyclic disturbance peaks in [minCyclicFreqHz, maxReportFreqHz]
+  const candidateBins = spectrum.filter((b) => b.freqHz >= minCyclicFreqHz);
+  const sortedByCyclicPower = [...candidateBins].sort(
+    (a, b) => b.actPsd + b.errPsd * 0.5 - (a.actPsd + a.errPsd * 0.5)
+  );
+
+  const selectedBins: FftSpectrumPoint[] = [];
+  for (const cand of sortedByCyclicPower) {
+    if (selectedBins.length >= 3) break;
+    const tooClose = selectedBins.some((sel) => Math.abs(sel.binIndex - cand.binIndex) < 2);
+    if (!tooClose) {
+      selectedBins.push(cand);
+    }
+  }
+
+  const cyclicPeaks: CyclicDisturbancePeak[] = selectedBins.map((b, idx) => {
+    const powerRatioActToSim = Number((b.actPsd / Math.max(1e-6, b.simPsd)).toFixed(2));
+    const cls = classifyCyclicDisturbancePeak(b.freqHz, b.periodSec, b.actPsd, b.simPsd);
+    return {
+      rank: idx + 1,
+      freqHz: b.freqHz,
+      periodSec: b.periodSec,
+      actPsd: b.actPsd,
+      simPsd: b.simPsd,
+      errPsd: b.errPsd,
+      powerRatioActToSim,
+      bandLabel: cls.bandLabel,
+      disturbanceSource: cls.disturbanceSource,
+      engineeringAdvice: cls.engineeringAdvice,
+    };
+  });
+
+  const domAct = maxActBin || spectrum[0];
+  const domSim = maxSimBin || spectrum[0];
+  const domErr = maxErrBin || spectrum[0];
+
+  const primaryPeak = cyclicPeaks[0];
+  const primaryDisturbanceSource = primaryPeak
+    ? `${primaryPeak.disturbanceSource} (主周期 T ≈ ${primaryPeak.periodSec}s, f ≈ ${primaryPeak.freqHz.toFixed(3)} Hz)`
+    : '稳态宽频背景噪声（无显著单频周期扰动）';
+
+  const summaryDiagnosis = primaryPeak
+    ? `FFT (${fftSize} 点 Radix-2) 频谱识别显示：实测 PV 主振荡频率 f1 = ${domAct.freqHz.toFixed(3)} Hz (周期 ${domAct.periodSec}s)，仿真 PV 主频 = ${domSim.freqHz.toFixed(3)} Hz (周期 ${domSim.periodSec}s)，频谱包络相似度 ${spectralSimilarityPct}%。首要循环扰动源判定为「${primaryPeak.disturbanceSource}」，${primaryPeak.engineeringAdvice}`
+    : `FFT (${fftSize} 点 Radix-2) 频谱平滑，实测与仿真频域包络一致度达 ${spectralSimilarityPct}%。`;
+
+  return {
+    fftSize,
+    sampleCount: n,
+    samplingIntervalSec: dt,
+    freqResolutionHz: Number(freqResolutionHz.toFixed(5)),
+    nyquistFreqHz,
+    spectrum,
+    dominantActFreqHz: domAct ? domAct.freqHz : 0.025,
+    dominantActPeriodSec: domAct ? domAct.periodSec : 40,
+    dominantSimFreqHz: domSim ? domSim.freqHz : 0.025,
+    dominantSimPeriodSec: domSim ? domSim.periodSec : 40,
+    dominantErrFreqHz: domErr ? domErr.freqHz : 0.025,
+    dominantErrPeriodSec: domErr ? domErr.periodSec : 40,
+    actTotalPower: Number(actTotalPower.toFixed(3)),
+    simTotalPower: Number(simTotalPower.toFixed(3)),
+    spectralSimilarityPct,
+    lowBandEnergyPct,
+    midBandEnergyPct,
+    highBandEnergyPct,
+    cyclicPeaks,
+    primaryDisturbanceSource,
+    summaryDiagnosis,
+  };
+}
+
+/**
+ * ============================================================================
  * V1.1 / V2 ADVANCED CAPABILITY 2:
  * Master-Slave Cascade Loop (TC11003 Master -> FC10901 Slave) Coupled Analysis
  * ============================================================================
