@@ -4,11 +4,14 @@ import {
   Download,
   FileCheck2,
   GitCompare,
+  Layers,
   Plus,
   Sparkles,
   Trash2,
 } from 'lucide-react';
 import {
+  FrequencyDomainAndCascadeCharts,
+  MasterSlaveStackedTrendChart,
   ScatterAndResidualCharts,
   SegmentBarAndSmallMultiples,
   TripleTrendAndErrorChart,
@@ -19,9 +22,11 @@ import {
   getScenarioTypeLabel,
   identifyProcessModelSummary,
   inferLoopTypeFromTag,
+  resolveMasterSlavePairBundles,
 } from '../core/engine';
 import {
   AlignmentOptions,
+  CascadeRole,
   ComparisonRunResult,
   DatasetParsed,
   PairItem,
@@ -67,11 +72,23 @@ export const ComparePage: React.FC<ComparePageProps> = ({
   onBackToMapping,
   onGenerateReport,
 }) => {
+  const [viewMode, setViewMode] = useState<'single' | 'cascade_stacked'>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('view') === 'cascade_stacked') return 'cascade_stacked';
+    }
+    return 'single';
+  });
+  const [overrideMasterPairId, setOverrideMasterPairId] = useState<string>('');
+  const [overrideSlavePairId, setOverrideSlavePairId] = useState<string>('');
+
   const [lttbEnabled, setLttbEnabled] = useState(true);
   const [showPairingBuilder, setShowPairingBuilder] = useState(false);
   const [newActTag, setNewActTag] = useState<string>(actualDataset.detectedTags[0] || 'FC10901');
   const [newActSegId, setNewActSegId] = useState<number>(1);
   const [newSimKey, setNewSimKey] = useState<string>(simDataset.detectedTags[0] || 'SIM_FIC_CLOSED');
+  const [newCascadeRole, setNewCascadeRole] = useState<CascadeRole>('slave');
+  const [newLinkedPairId, setNewLinkedPairId] = useState<string>('pair_tc_closed');
 
   const currentPairBundle =
     runResult.pairResults.find((p) => p.pair.id === activePairId) || runResult.pairResults[0];
@@ -79,6 +96,18 @@ export const ComparePage: React.FC<ComparePageProps> = ({
   const detectedSlices = useMemo(
     () => detectAutoSliceWindows(actualDataset, pouDictionary),
     [actualDataset, pouDictionary]
+  );
+
+  const resolvedStack = useMemo(
+    () =>
+      resolveMasterSlavePairBundles(
+        runResult.pairResults,
+        activePairId,
+        overrideMasterPairId || undefined,
+        overrideSlavePairId || undefined,
+        alignmentOptions.gridSec
+      ),
+    [runResult.pairResults, activePairId, overrideMasterPairId, overrideSlavePairId, alignmentOptions.gridSec]
   );
 
   if (!currentPairBundle) {
@@ -111,11 +140,11 @@ export const ComparePage: React.FC<ComparePageProps> = ({
         pt.actSv.toFixed(4),
         pt.simPv.toFixed(4),
         pt.actPv.toFixed(4),
-        pt.errorPv.toFixed(4),
+        pt.errorPvAbs.toFixed(4),
         pt.errorPvPct.toFixed(4),
         pt.simMv.toFixed(4),
         pt.actMv.toFixed(4),
-        pt.errorMv.toFixed(4),
+        pt.errorMvAbs.toFixed(4),
         pt.simMode,
         pt.actMode,
       ].join(',')
@@ -142,22 +171,39 @@ export const ComparePage: React.FC<ComparePageProps> = ({
       (p) => p.segmentId === newActSegId
     );
     const durationSec = Math.min(350, Math.max(60, segPoints.length - 10));
+    const linkedPair = pairs.find((p) => p.id === newLinkedPairId);
     const created: PairItem = {
       id: `pair_custom_${Date.now().toString(36)}`,
       name: `${newActTag} (段#${newActSegId}) ↔ ${newSimKey}`,
       loopType,
       scenario,
+      scenarioType: scenario,
       actualTag: newActTag,
       actualSegmentId: newActSegId,
       actualWindowStartSec: 0,
       actualWindowEndSec: durationSec,
       simKey: newSimKey,
       simTag: newSimKey,
+      scenarioName: getScenarioTypeLabel(scenario),
       simWindowStartSec: 0,
       simWindowEndSec: durationSec,
       pvSpan: pouMatch ? [pouMatch.svl, pouMatch.svh] : loopType === 'flow' ? [0, 300] : [0, 100],
       mvSpan: pouMatch ? [pouMatch.mvl, pouMatch.mvh] : [0, 100],
       unit: pouMatch ? pouMatch.unit : loopType === 'temperature' ? '°C' : 'm³/h',
+      cascadeRole: newCascadeRole,
+      linkedPairId: newCascadeRole !== 'standalone' ? newLinkedPairId : undefined,
+      masterTag:
+        newCascadeRole === 'master'
+          ? newActTag
+          : newCascadeRole === 'slave'
+          ? linkedPair?.actualTag || 'TC11003'
+          : undefined,
+      slaveTag:
+        newCascadeRole === 'slave'
+          ? newActTag
+          : newCascadeRole === 'master'
+          ? linkedPair?.actualTag || 'FC10901'
+          : undefined,
     };
     onAddPair(created);
     onSelectPairId(created.id);
@@ -173,15 +219,40 @@ export const ComparePage: React.FC<ComparePageProps> = ({
     return <span className="text-rose-700 font-mono font-bold">✖ 不合格 (FAIL)</span>;
   };
 
+  const renderCascadeRoleBadge = (p: PairItem) => {
+    if (p.cascadeRole === 'master') {
+      return (
+        <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded">
+          主环 Master → {p.slaveTag || 'FC10901'}
+        </span>
+      );
+    }
+    if (p.cascadeRole === 'slave') {
+      return (
+        <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold bg-cyan-50 text-cyan-700 border border-cyan-200 rounded">
+          副环 Slave ← {p.masterTag || 'TC11003'}
+        </span>
+      );
+    }
+    return (
+      <span className="px-1.5 py-0.5 text-[10px] font-mono text-slate-500 bg-slate-100 border border-slate-200 rounded">
+        独立单回路
+      </span>
+    );
+  };
+
   return (
     <div className="space-y-5">
       {/* Top Workbench Header & Alignment Toolbar */}
       <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <h1 className="text-xl font-bold text-slate-900 text-balance">
-              03. 回路配对、时间轴对齐与多维可视化对比工作台
-            </h1>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="text-xl font-bold text-slate-900 text-balance">
+                03. 回路配对、时间轴对齐与多维可视化对比工作台
+              </h1>
+              {renderCascadeRoleBadge(pair)}
+            </div>
             <p className="text-sm text-slate-600 mt-0.5">
               当前检视：<strong className="font-mono text-slate-900">{pair.name}</strong> ·{' '}
               {getLoopTypeLabel(pair.loopType)} · 量程 [{pair.pvSpan[0]}, {pair.pvSpan[1]}] {pair.unit} · 有效参与计算{' '}
@@ -191,6 +262,39 @@ export const ComparePage: React.FC<ComparePageProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* View Mode Switcher: Single Loop View vs Master-Slave Vertically Stacked View */}
+            <div
+              role="group"
+              aria-label="趋势视图模式切换"
+              className="inline-flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200"
+            >
+              <button
+                type="button"
+                data-testid="view-mode-single-btn"
+                onClick={() => setViewMode('single')}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
+                  viewMode === 'single'
+                    ? 'bg-white text-slate-900 shadow-xs border border-slate-200/80'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                单回路深度检视
+              </button>
+              <button
+                type="button"
+                data-testid="view-mode-cascade-stacked-btn"
+                onClick={() => setViewMode('cascade_stacked')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
+                  viewMode === 'cascade_stacked'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-slate-700 hover:text-blue-700'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                主副回路垂直叠放视图 (TC / FC)
+              </button>
+            </div>
+
             <button
               type="button"
               onClick={() => setShowPairingBuilder(!showPairingBuilder)}
@@ -201,7 +305,7 @@ export const ComparePage: React.FC<ComparePageProps> = ({
               }`}
             >
               <GitCompare className="w-3.5 h-3.5" />
-              配对矩阵与三类切片规则 ({pairs.length}组)
+              配对矩阵与主从关联 ({pairs.length}组)
             </button>
             <button
               type="button"
@@ -273,10 +377,10 @@ export const ComparePage: React.FC<ComparePageProps> = ({
                 </div>
               </div>
 
-              {/* Right 5 cols: Custom Pair Creator & Active Pairs List */}
+              {/* Right 5 cols: Custom Pair Creator (with Master-Slave Cascade Role) & Active Pairs List */}
               <div className="lg:col-span-5 space-y-2.5">
                 <span className="font-bold text-slate-900 block">
-                  新增自定义「实测连续段 ↔ 仿真场景」配对组
+                  新增自定义「实测连续段 ↔ 仿真场景」配对组（支持主从回路关联）
                 </span>
                 <div className="grid grid-cols-3 gap-2 bg-white p-2.5 border border-slate-200 rounded">
                   <div>
@@ -321,6 +425,33 @@ export const ComparePage: React.FC<ComparePageProps> = ({
                       ))}
                     </select>
                   </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-500 mb-0.5">主从回路角色</label>
+                    <select
+                      value={newCascadeRole}
+                      onChange={(e) => setNewCascadeRole(e.target.value as CascadeRole)}
+                      className="w-full px-1.5 py-1 bg-slate-50 border border-slate-300 rounded text-xs"
+                    >
+                      <option value="slave">副调回路 (Slave)</option>
+                      <option value="master">主调回路 (Master)</option>
+                      <option value="standalone">独立单回路</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[10px] text-slate-500 mb-0.5">关联主/副配对组 (linkedPairId)</label>
+                    <select
+                      value={newLinkedPairId}
+                      disabled={newCascadeRole === 'standalone'}
+                      onChange={(e) => setNewLinkedPairId(e.target.value)}
+                      className="w-full px-1.5 py-1 bg-slate-50 border border-slate-300 rounded font-mono text-xs disabled:opacity-50"
+                    >
+                      {pairs.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <div className="col-span-3 flex justify-end pt-1">
                     <button
                       type="button"
@@ -328,30 +459,45 @@ export const ComparePage: React.FC<ComparePageProps> = ({
                       className="inline-flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
-                      添加配对并立即对齐计算
+                      添加配对并绑定主从拓扑
                     </button>
                   </div>
                 </div>
 
-                <div className="space-y-1 max-h-28 overflow-y-auto">
+                <div className="space-y-1 max-h-32 overflow-y-auto">
                   {pairs.map((p) => (
                     <div
                       key={p.id}
-                      className="flex items-center justify-between px-2.5 py-1 bg-white border border-slate-200 rounded font-mono text-[11px]"
+                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-white border border-slate-200 rounded font-mono text-[11px]"
                     >
-                      <span className="truncate">
-                        {p.name} · <span className="font-sans text-slate-500">{getScenarioTypeLabel(p.scenario)}</span>
-                      </span>
-                      {pairs.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => onRemovePair(p.id)}
-                          className="text-slate-400 hover:text-rose-600 ml-2"
-                          title="删除该配对"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      <div className="flex items-center gap-2 truncate">
+                        <span className="truncate">{p.name}</span>
+                        {renderCascadeRoleBadge(p)}
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {p.linkedPairId && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectPairId(p.id);
+                              setViewMode('cascade_stacked');
+                            }}
+                            className="px-1.5 py-0.5 text-[10px] font-sans font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded border border-blue-200"
+                          >
+                            叠放检视
+                          </button>
+                        )}
+                        {pairs.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => onRemovePair(p.id)}
+                            className="text-slate-400 hover:text-rose-600"
+                            title="删除该配对"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -373,7 +519,13 @@ export const ComparePage: React.FC<ComparePageProps> = ({
             >
               {runResult.pairResults.map((pr) => (
                 <option key={pr.pair.id} value={pr.pair.id}>
-                  {pr.pair.name} (RMSE: {pr.metrics.rmsePct.toFixed(2)}%)
+                  {pr.pair.name}{' '}
+                  {pr.pair.cascadeRole === 'master'
+                    ? '[主环 Master]'
+                    : pr.pair.cascadeRole === 'slave'
+                    ? '[副环 Slave]'
+                    : ''}{' '}
+                  (RMSE: {pr.metrics.rmsePct.toFixed(2)}%)
                 </option>
               ))}
             </select>
@@ -496,6 +648,51 @@ export const ComparePage: React.FC<ComparePageProps> = ({
           </div>
         </div>
 
+        {/* Master-Slave Association Selector Bar (Shown when in Cascade Stacked View Mode) */}
+        {viewMode === 'cascade_stacked' && resolvedStack && (
+          <div
+            data-testid="cascade-association-bar"
+            className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg flex flex-wrap items-center justify-between gap-3 text-xs"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold text-blue-950">主从回路叠放关联配置 (PairItem 主从模型)：</span>
+              <span className="font-mono text-blue-800">{resolvedStack.associationLabel}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-1.5">
+                <label className="font-semibold text-slate-700">上层主回路 (Master TC):</label>
+                <select
+                  value={resolvedStack.masterBundle.pair.id}
+                  onChange={(e) => setOverrideMasterPairId(e.target.value)}
+                  aria-label="选择上层主回路配对"
+                  className="px-2 py-1 bg-white border border-blue-300 rounded font-mono text-slate-900"
+                >
+                  {runResult.pairResults.map((pr) => (
+                    <option key={pr.pair.id} value={pr.pair.id}>
+                      {pr.pair.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <label className="font-semibold text-slate-700">下层副回路 (Slave FC):</label>
+                <select
+                  value={resolvedStack.slaveBundle.pair.id}
+                  onChange={(e) => setOverrideSlavePairId(e.target.value)}
+                  aria-label="选择下层副回路配对"
+                  className="px-2 py-1 bg-white border border-blue-300 rounded font-mono text-slate-900"
+                >
+                  {runResult.pairResults.map((pr) => (
+                    <option key={pr.pair.id} value={pr.pair.id}>
+                      {pr.pair.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Data Governance Pitfall Protection Bar */}
         <div className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
           <div className="flex flex-wrap items-center gap-4">
@@ -537,39 +734,160 @@ export const ComparePage: React.FC<ComparePageProps> = ({
 
       {/* Main Split Console: Left/Center Charts (8 cols) + Right Quantitative Metrics Inspector (4 cols) */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
-        {/* Left 8 Columns: 8 Interactive Visualization Charts */}
+        {/* Left 8 Columns: Interactive Visualization Charts */}
         <div className="xl:col-span-8 space-y-5">
-          {/* Chart 1 & 2: Triple Trend (SV/PV/MV) + Deviation Band */}
-          <TripleTrendAndErrorChart
-            series={alignedSeries}
-            metrics={metrics}
-            lttbEnabled={lttbEnabled}
-            onToggleLttb={() => setLttbEnabled(!lttbEnabled)}
-          />
+          {viewMode === 'cascade_stacked' && resolvedStack ? (
+            <>
+              {/* New View Mode: Vertically Stacked Synchronized Master (TC) & Slave (FC) Trend Chart */}
+              <MasterSlaveStackedTrendChart resolvedStack={resolvedStack} />
 
-          {/* Chart 3, 4, 5, 6: PV Scatter (y=x) + Residual Histogram + MV-PV Valve Hysteresis + Cross-Correlation Lag Spectrum */}
-          <ScatterAndResidualCharts
-            series={alignedSeries}
-            metrics={metrics}
-            residualDist={residualDist}
-            onApplyLagSec={(lagSec) =>
-              onUpdateAlignmentOptions({
-                ...alignmentOptions,
-                manualLagSec: lagSec,
-              })
-            }
-          />
+              {/* Frequency-Domain PSD & Cascade Coupled Diagnostic Cards */}
+              <FrequencyDomainAndCascadeCharts
+                series={alignedSeries}
+                metrics={metrics}
+                gridSec={alignmentOptions.gridSec}
+                allPairResults={runResult.pairResults}
+              />
 
-          {/* Chart 5 & 6: Segment Metrics Bar Chart + Multi-Loop Small Multiples */}
-          <SegmentBarAndSmallMultiples
-            allPairResults={runResult.pairResults}
-            activePairId={activePairId}
-            onSelectPair={onSelectPairId}
-          />
+              {/* Segment Metrics Bar Chart + Multi-Loop Small Multiples */}
+              <SegmentBarAndSmallMultiples
+                allPairResults={runResult.pairResults}
+                activePairId={activePairId}
+                onSelectPair={onSelectPairId}
+              />
+            </>
+          ) : (
+            <>
+              {/* Chart 1 & 2: Triple Trend (SV/PV/MV) + Deviation Band */}
+              <TripleTrendAndErrorChart
+                series={alignedSeries}
+                metrics={metrics}
+                lttbEnabled={lttbEnabled}
+                onToggleLttb={() => setLttbEnabled(!lttbEnabled)}
+              />
+
+              {/* Chart 3, 4, 5, 6: PV Scatter (y=x) + Residual Histogram + MV-PV Valve Hysteresis + Cross-Correlation Lag Spectrum */}
+              <ScatterAndResidualCharts
+                series={alignedSeries}
+                metrics={metrics}
+                residualDist={residualDist}
+                onApplyLagSec={(lagSec) =>
+                  onUpdateAlignmentOptions({
+                    ...alignmentOptions,
+                    manualLagSec: lagSec,
+                  })
+                }
+              />
+
+              {/* Chart 7 & 8: Closed-Loop Frequency-Domain PSD Spectrum + Master-Slave Cascade Loop (TC11003 -> FC10901) Coupled Analysis */}
+              <FrequencyDomainAndCascadeCharts
+                series={alignedSeries}
+                metrics={metrics}
+                gridSec={alignmentOptions.gridSec}
+                allPairResults={runResult.pairResults}
+              />
+
+              {/* Chart 9 & 10: Segment Metrics Bar Chart + Multi-Loop Small Multiples */}
+              <SegmentBarAndSmallMultiples
+                allPairResults={runResult.pairResults}
+                activePairId={activePairId}
+                onSelectPair={onSelectPairId}
+              />
+            </>
+          )}
         </div>
 
         {/* Right 4 Columns: Quantitative Metrics & POU PID Diff Card */}
         <div className="xl:col-span-4 space-y-4">
+          {/* Master-Slave Side-by-Side Comparison Card when in Cascade Stacked Mode */}
+          {viewMode === 'cascade_stacked' && resolvedStack && (
+            <div
+              data-testid="cascade-side-by-side-metrics-card"
+              className="bg-white border border-blue-200 rounded-lg p-4 space-y-3"
+            >
+              <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+                <div>
+                  <span className="text-[11px] font-semibold text-blue-700 block">
+                    串级主从回路同步指标对照
+                  </span>
+                  <h2 className="text-sm font-bold text-slate-900">
+                    主环 {resolvedStack.masterBundle.pair.actualTag} / 副环 {resolvedStack.slaveBundle.pair.actualTag}
+                  </h2>
+                </div>
+                <span className="px-2 py-0.5 text-xs font-mono font-bold bg-blue-50 text-blue-700 border border-blue-200 rounded">
+                  R_τ = {resolvedStack.cascadeAnalysis.tauRatio}:1
+                </span>
+              </div>
+
+              <table className="w-full text-xs border-collapse font-mono tabular-nums">
+                <thead>
+                  <tr className="text-slate-500 border-b border-slate-200 text-left">
+                    <th className="py-1.5 font-sans">对比维度</th>
+                    <th className="py-1.5 text-right">主环 ({resolvedStack.masterBundle.pair.actualTag})</th>
+                    <th className="py-1.5 text-right">副环 ({resolvedStack.slaveBundle.pair.actualTag})</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  <tr>
+                    <td className="py-1.5 font-sans text-slate-700">归一化 RMSE (%量程)</td>
+                    <td className="py-1.5 text-right font-bold text-slate-900">
+                      {resolvedStack.masterBundle.metrics.rmsePct.toFixed(3)}%
+                    </td>
+                    <td className="py-1.5 text-right font-bold text-slate-900">
+                      {resolvedStack.slaveBundle.metrics.rmsePct.toFixed(3)}%
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 font-sans text-slate-700">归一化 MAE (%量程)</td>
+                    <td className="py-1.5 text-right">{resolvedStack.masterBundle.metrics.maePct.toFixed(3)}%</td>
+                    <td className="py-1.5 text-right">{resolvedStack.slaveBundle.metrics.maePct.toFixed(3)}%</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 font-sans text-slate-700">实测超调量 Overshoot</td>
+                    <td className="py-1.5 text-right text-amber-700">
+                      {resolvedStack.masterBundle.metrics.actClosedLoop.overshootPct.toFixed(2)}%
+                    </td>
+                    <td className="py-1.5 text-right text-amber-700">
+                      {resolvedStack.slaveBundle.metrics.actClosedLoop.overshootPct.toFixed(2)}%
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 font-sans text-slate-700">实测调节时间 Ts(±2%)</td>
+                    <td className="py-1.5 text-right">
+                      {resolvedStack.masterBundle.metrics.actClosedLoop.settlingTime2PctSec.toFixed(1)}s
+                    </td>
+                    <td className="py-1.5 text-right">
+                      {resolvedStack.slaveBundle.metrics.actClosedLoop.settlingTime2PctSec.toFixed(1)}s
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 font-sans text-slate-700">等效时间常数 τ_63</td>
+                    <td className="py-1.5 text-right font-semibold text-blue-700">
+                      {resolvedStack.cascadeAnalysis.tauMasterSec}s
+                    </td>
+                    <td className="py-1.5 text-right font-semibold text-cyan-700">
+                      {resolvedStack.cascadeAnalysis.tauSlaveSec}s
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 font-sans text-slate-700">误差责任归因占比</td>
+                    <td className="py-1.5 text-right font-bold text-blue-700">
+                      {resolvedStack.cascadeAnalysis.masterModelContributionPct}% (主环模型)
+                    </td>
+                    <td className="py-1.5 text-right font-bold text-amber-700">
+                      {resolvedStack.cascadeAnalysis.slaveLagContributionPct}% (副环滞后)
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded text-[11px] text-slate-700 leading-relaxed">
+                <strong className="text-slate-900">主从叠放诊断结论：</strong>
+                {resolvedStack.cascadeAnalysis.diagnosis}
+              </div>
+            </div>
+          )}
+
           {/* Card A: Overall Evaluation & Error Metrics */}
           <div className="bg-white border border-slate-200 rounded-lg p-4">
             <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-200">

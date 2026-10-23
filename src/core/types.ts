@@ -147,6 +147,8 @@ export interface MappingTemplate {
   mapping: Omit<FieldMappingConfig, 'datasetId' | 'loopOverrides'>;
 }
 
+export type CascadeRole = 'standalone' | 'master' | 'slave';
+
 export interface PairItem {
   id: string;
   name: string;
@@ -156,10 +158,23 @@ export interface PairItem {
   simTag: string;
   scenarioName: string;
   scenarioType: ScenarioType;
+  scenario?: ScenarioType;
   loopType: LoopType;
   pvSpan: [number, number];
   mvSpan: [number, number];
   unit: string;
+  actualWindowStartSec?: number;
+  actualWindowEndSec?: number;
+  simWindowStartSec?: number;
+  simWindowEndSec?: number;
+  /** 主从串级回路角色：单回路 / 主调回路 (Master, 如 TC11003) / 副调回路 (Slave, 如 FC10901) */
+  cascadeRole?: CascadeRole;
+  /** 关联的主回路或副回路配对 ID (例如 pair_tc_closed <-> pair_fc_closed) */
+  linkedPairId?: string;
+  /** 串级拓扑中的主回路位号 (如 TC11003) */
+  masterTag?: string;
+  /** 串级拓扑中的副回路位号 (如 FC10901) */
+  slaveTag?: string;
 }
 
 export interface AlignmentOptions {

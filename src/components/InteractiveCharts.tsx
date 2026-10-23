@@ -1,13 +1,17 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Download, Maximize2, RotateCcw, Sliders } from 'lucide-react';
 import {
+  computeCascadeCoupledAnalysis,
   computeCrossCorrelationCurve,
+  computeSpectralPsdAnalysis,
   computeValveHysteresisMetrics,
   getLoopTypeLabel,
   lttbDownsample,
+  ResolvedMasterSlaveStack,
 } from '../core/engine';
 import {
   AlignedPoint,
+  ComparisonRunResult,
   PairComparisonMetrics,
   PairItem,
   ResidualDistribution,
@@ -1121,3 +1125,924 @@ export const SegmentBarAndSmallMultiples: React.FC<{
     </div>
   );
 };
+
+interface FrequencyAndCascadeProps {
+  series: AlignedPoint[];
+  metrics: PairComparisonMetrics;
+  gridSec: number;
+  allPairResults: ComparisonRunResult['pairResults'];
+}
+
+export const FrequencyDomainAndCascadeCharts: React.FC<FrequencyAndCascadeProps> = ({
+  series,
+  metrics,
+  gridSec,
+  allPairResults,
+}) => {
+  const psd = useMemo(
+    () => computeSpectralPsdAnalysis(series, gridSec, metrics.actClosedLoop.overshootPct),
+    [series, gridSec, metrics.actClosedLoop.overshootPct]
+  );
+
+  const cascade = useMemo(
+    () => computeCascadeCoupledAnalysis(allPairResults),
+    [allPairResults]
+  );
+
+  // PSD SVG geometry
+  const psdW = 480;
+  const psdH = 210;
+  const pPadL = 44;
+  const pPadR = 16;
+  const pPadT = 22;
+  const pPadB = 34;
+  const pPlotW = psdW - pPadL - pPadR;
+  const pPlotH = psdH - pPadT - pPadB;
+
+  const maxErrPsd = Math.max(1e-4, ...psd.bins.map((b) => Math.max(b.errPsd, b.actPsd * 0.2)));
+  const maxFreq = Math.max(0.05, psd.bins[psd.bins.length - 1]?.freqHz || 0.25);
+  const minFreq = psd.bins[0]?.freqHz || 0.004;
+  const freqSpan = Math.max(1e-4, maxFreq - minFreq);
+
+  const toPsdX = (f: number) => pPadL + ((f - minFreq) / freqSpan) * pPlotW;
+  const toPsdY = (val: number) => pPadT + (1 - Math.min(1, val / maxErrPsd)) * pPlotH;
+
+  const errPsdPoints = psd.bins.map((b) => `${toPsdX(b.freqHz).toFixed(1)},${toPsdY(b.errPsd).toFixed(1)}`).join(' ');
+  const errAreaPoints =
+    psd.bins.length > 1
+      ? `${toPsdX(psd.bins[0].freqHz).toFixed(1)},${(pPadT + pPlotH).toFixed(1)} ${errPsdPoints} ${toPsdX(
+          psd.bins[psd.bins.length - 1].freqHz
+        ).toFixed(1)},${(pPadT + pPlotH).toFixed(1)}`
+      : '';
+
+  const peakX = toPsdX(psd.dominantFreqHz);
+  const peakY = toPsdY(psd.dominantPeakPower);
+
+  // Cascade Dual-Layer SVG geometry
+  const casSample = useMemo(
+    () =>
+      cascade.syncedSeries.length > 140
+        ? cascade.syncedSeries.filter((_, i) => i % Math.ceil(cascade.syncedSeries.length / 140) === 0)
+        : cascade.syncedSeries,
+    [cascade.syncedSeries]
+  );
+
+  const casW = 480;
+  const casH = 225;
+  const cPadL = 44;
+  const cPadR = 16;
+  const topPlotY = 18;
+  const topPlotH = 78;
+  const botPlotY = 118;
+  const botPlotH = 78;
+  const cPlotW = casW - cPadL - cPadR;
+
+  const maxCasT = Math.max(1, casSample[casSample.length - 1]?.t || 1);
+  const toCasX = (t: number) => cPadL + (t / maxCasT) * cPlotW;
+
+  const tcVals = casSample.flatMap((p) => [p.tcSv, p.tcSimPv, p.tcActPv]);
+  const tcMin = tcVals.length ? Math.min(...tcVals) - 1.5 : 50;
+  const tcMax = tcVals.length ? Math.max(...tcVals) + 1.5 : 90;
+  const tcSpan = Math.max(1, tcMax - tcMin);
+  const toTopY = (v: number) => topPlotY + (1 - (v - tcMin) / tcSpan) * topPlotH;
+
+  const fcVals = casSample.flatMap((p) => [p.fcSv, p.fcSimPv, p.fcActPv]);
+  const fcMin = fcVals.length ? Math.min(...fcVals) - 4 : 100;
+  const fcMax = fcVals.length ? Math.max(...fcVals) + 4 : 240;
+  const fcSpan = Math.max(1, fcMax - fcMin);
+  const toBotY = (v: number) => botPlotY + (1 - (v - fcMin) / fcSpan) * botPlotH;
+
+  const tcSimLine = casSample.map((p) => `${toCasX(p.t).toFixed(1)},${toTopY(p.tcSimPv).toFixed(1)}`).join(' ');
+  const tcActLine = casSample.map((p) => `${toCasX(p.t).toFixed(1)},${toTopY(p.tcActPv).toFixed(1)}`).join(' ');
+  const tcSvLine = casSample.map((p) => `${toCasX(p.t).toFixed(1)},${toTopY(p.tcSv).toFixed(1)}`).join(' ');
+
+  const fcSimLine = casSample.map((p) => `${toCasX(p.t).toFixed(1)},${toBotY(p.fcSimPv).toFixed(1)}`).join(' ');
+  const fcActLine = casSample.map((p) => `${toCasX(p.t).toFixed(1)},${toBotY(p.fcActPv).toFixed(1)}`).join(' ');
+  const fcSvLine = casSample.map((p) => `${toCasX(p.t).toFixed(1)},${toBotY(p.fcSv).toFixed(1)}`).join(' ');
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {/* Left Card: Closed-Loop Frequency-Domain PSD & Robustness Analysis */}
+      <div className="border border-slate-200 bg-white rounded-lg p-4 space-y-3">
+        <div>
+          <h4 className="text-sm font-semibold text-slate-900">
+            闭环频域功率谱密度 (PSD / FFT) 与鲁棒稳定裕度分析
+          </h4>
+          <p className="text-xs text-slate-500">
+            识别残差序列主振荡周期 T_osc 与精馏塔/加热炉周期性外部扰动源 ({metrics.actualTag})
+          </p>
+        </div>
+
+        <svg
+          data-testid="psd-spectrum-svg"
+          viewBox={`0 0 ${psdW} ${psdH}`}
+          className="w-full h-48 bg-slate-50 border border-slate-200 rounded"
+        >
+          <rect x={pPadL} y={pPadT} width={pPlotW} height={pPlotH} fill="#FFFFFF" stroke="#E2E8F0" />
+          {/* Frequency Band Shaded Zones: Low (<0.02Hz), Mid (0.02-0.12Hz), High (>0.12Hz) */}
+          <rect
+            x={pPadL}
+            y={pPadT}
+            width={Math.max(0, toPsdX(0.02) - pPadL)}
+            height={pPlotH}
+            fill="#F1F5F9"
+            fillOpacity={0.7}
+          />
+          <rect
+            x={toPsdX(0.02)}
+            y={pPadT}
+            width={Math.max(0, toPsdX(0.12) - toPsdX(0.02))}
+            height={pPlotH}
+            fill="#EFF6FF"
+            fillOpacity={0.55}
+          />
+
+          {errAreaPoints && <polygon points={errAreaPoints} fill="#DBEAFE" fillOpacity={0.65} />}
+          {errPsdPoints && <polyline fill="none" stroke="#2563EB" strokeWidth="2" points={errPsdPoints} />}
+
+          {/* Dominant Peak Annotation */}
+          {psd.bins.length > 1 && (
+            <g>
+              <line
+                x1={peakX}
+                y1={pPadT}
+                x2={peakX}
+                y2={pPadT + pPlotH}
+                stroke="#D97706"
+                strokeWidth="1.2"
+                strokeDasharray="3,2"
+              />
+              <circle cx={peakX} cy={peakY} r={4} fill="#D97706" stroke="#FFFFFF" strokeWidth="1.2" />
+              <text
+                x={Math.min(psdW - 145, peakX + 8)}
+                y={Math.max(pPadT + 15, peakY + 4)}
+                fontSize="10"
+                fontFamily="monospace"
+                fontWeight="bold"
+                fill="#B45309"
+              >
+                f_peak={psd.dominantFreqHz.toFixed(3)}Hz (T≈{psd.dominantPeriodSec}s)
+              </text>
+            </g>
+          )}
+
+          {/* Axis Labels above plot box */}
+          <text x={pPadL + 2} y={pPadT - 5} fontSize="9.5" fontFamily="monospace" fill="#475569">
+            低频漂移(&lt;0.02Hz)
+          </text>
+          <text x={toPsdX(0.032)} y={pPadT - 5} fontSize="9.5" fontFamily="monospace" fill="#1D4ED8">
+            中频控制谐振带 (0.02–0.12Hz)
+          </text>
+          <text x={toPsdX(0.135)} y={pPadT - 5} fontSize="9.5" fontFamily="monospace" fill="#64748B">
+            高频噪声带 (&gt;0.12Hz)
+          </text>
+
+          <text x={pPadL} y={psdH - 10} fontSize="10" fontFamily="monospace" fill="#64748B">
+            {minFreq.toFixed(3)} Hz
+          </text>
+          <text x={pPadL + pPlotW / 2} y={psdH - 10} textAnchor="middle" fontSize="10" fontFamily="monospace" fill="#475569">
+            频率 f (Hz) · Hann 窗离散傅里叶功率谱密度
+          </text>
+          <text x={pPadL + pPlotW} y={psdH - 10} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            {maxFreq.toFixed(2)} Hz
+          </text>
+        </svg>
+
+        {/* Robustness & Band Energy Strip */}
+        <div className="grid grid-cols-4 gap-2 text-center font-mono tabular-nums text-xs">
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">主振荡周期 T_osc</span>
+            <span className="font-bold text-amber-700">{psd.dominantPeriodSec}s</span>
+          </div>
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">等效幅值/相角裕度</span>
+            <span className="font-bold text-slate-900">
+              {psd.gainMarginDb}dB / {psd.phaseMarginDeg}°
+            </span>
+          </div>
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">鲁棒灵敏度峰值 Ms</span>
+            <span className="font-bold text-blue-700">{psd.sensitivityPeakMs}</span>
+          </div>
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">频段能量 (低/中/高)</span>
+            <span className="font-semibold text-slate-800 text-[11px]">
+              {psd.lowFreqEnergyPct}/{psd.midFreqEnergyPct}/{psd.highFreqEnergyPct}%
+            </span>
+          </div>
+        </div>
+
+        <p className="text-[11px] text-slate-600 leading-relaxed bg-slate-50 p-2.5 border border-slate-200 rounded">
+          <strong className="text-slate-900">频域诊断结论：</strong>
+          {psd.diagnosis}
+        </p>
+      </div>
+
+      {/* Right Card: Cascade Loop (Master TC11003 + Slave FC10901) Coupled Analysis */}
+      <div className="border border-slate-200 bg-white rounded-lg p-4 space-y-3">
+        <div>
+          <h4 className="text-sm font-semibold text-slate-900">
+            串级回路（主调 {cascade.masterTag} → 副调 {cascade.slaveTag}）双层联立耦合分析
+          </h4>
+          <p className="text-xs text-slate-500">
+            同步锁定主环温度与副环流量时间轴，定量剥离「副环跟随滞后」与「主环热容模型失配」
+          </p>
+        </div>
+
+        <svg
+          data-testid="cascade-coupled-svg"
+          viewBox={`0 0 ${casW} ${casH}`}
+          className="w-full h-48 bg-slate-50 border border-slate-200 rounded"
+        >
+          {/* Upper Track: Master Loop TC11003 */}
+          <text x={cPadL} y={topPlotY - 4} fontSize="10" fontFamily="monospace" fontWeight="bold" fill="#0F172A">
+            [主环 Master] {cascade.masterTag} 温度 (°C) · τ1={cascade.tauMasterSec}s
+          </text>
+          <rect x={cPadL} y={topPlotY} width={cPlotW} height={topPlotH} fill="#FFFFFF" stroke="#E2E8F0" />
+          <polyline fill="none" stroke="#94A3B8" strokeWidth="1.2" strokeDasharray="2,2" points={tcSvLine} />
+          <polyline fill="none" stroke="#2563EB" strokeWidth="1.8" points={tcSimLine} />
+          <polyline fill="none" stroke="#D97706" strokeWidth="1.6" strokeDasharray="5,3" points={tcActLine} />
+
+          {/* Lower Track: Slave Loop FC10901 */}
+          <text x={cPadL} y={botPlotY - 4} fontSize="10" fontFamily="monospace" fontWeight="bold" fill="#0F172A">
+            [副环 Slave] {cascade.slaveTag} 流量 (m³/h) · τ2={cascade.tauSlaveSec}s · 跨环滞后 Δt={cascade.crossLoopLagSec}s
+          </text>
+          <rect x={cPadL} y={botPlotY} width={cPlotW} height={botPlotH} fill="#FFFFFF" stroke="#E2E8F0" />
+          <polyline fill="none" stroke="#94A3B8" strokeWidth="1.2" strokeDasharray="2,2" points={fcSvLine} />
+          <polyline fill="none" stroke="#2563EB" strokeWidth="1.8" points={fcSimLine} />
+          <polyline fill="none" stroke="#D97706" strokeWidth="1.6" strokeDasharray="5,3" points={fcActLine} />
+
+          {/* Common Time Axis */}
+          <text x={cPadL} y={casH - 8} fontSize="10" fontFamily="monospace" fill="#64748B">
+            T+0s
+          </text>
+          <text x={cPadL + cPlotW / 2} y={casH - 8} textAnchor="middle" fontSize="10" fontFamily="monospace" fill="#475569">
+            主副环同步时间轴 (蓝实线: 仿真 | 橙虚线: 实测)
+          </text>
+          <text x={cPadL + cPlotW} y={casH - 8} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            T+{maxCasT}s
+          </text>
+        </svg>
+
+        {/* Cascade Metrics Strip */}
+        <div className="grid grid-cols-4 gap-2 text-center font-mono tabular-nums text-xs">
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">时间常数比 R_τ (τ₁/τ₂)</span>
+            <span className="font-bold text-slate-900">{cascade.tauRatio} : 1</span>
+          </div>
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">主→副跨环滞后</span>
+            <span className="font-bold text-blue-700">
+              {cascade.crossLoopLagSec}s (r={cascade.crossLoopCorr})
+            </span>
+          </div>
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">副环流量滞后贡献</span>
+            <span className="font-bold text-amber-700">{cascade.slaveLagContributionPct}%</span>
+          </div>
+          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+            <span className="text-[10px] text-slate-400 block">主环温度模型失配</span>
+            <span className="font-bold text-blue-700">{cascade.masterModelContributionPct}%</span>
+          </div>
+        </div>
+
+        <p className="text-[11px] text-slate-600 leading-relaxed bg-slate-50 p-2.5 border border-slate-200 rounded">
+          <strong className="text-slate-900">串级耦合溯源：</strong>
+          {cascade.diagnosis}
+        </p>
+      </div>
+    </div>
+  );
+};
+
+interface MasterSlaveStackedTrendProps {
+  resolvedStack: ResolvedMasterSlaveStack;
+}
+
+/**
+ * Vertically Stacked Synchronized Trend View for Master Loop (TC) & Slave Loop (FC)
+ */
+export const MasterSlaveStackedTrendChart: React.FC<MasterSlaveStackedTrendProps> = ({
+  resolvedStack,
+}) => {
+  const { masterBundle, slaveBundle, stackedSeries, cascadeAnalysis, isDirectLinked } = resolvedStack;
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [showSv, setShowSv] = useState(true);
+  const [showSimPv, setShowSimPv] = useState(true);
+  const [showActPv, setShowActPv] = useState(true);
+  const [showMvTrack, setShowMvTrack] = useState(true);
+  const [zoomRange, setZoomRange] = useState<[number, number]>([0, 100]);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+
+  const slicedStack = useMemo(() => {
+    if (stackedSeries.length === 0) return [];
+    const sIdx = Math.floor((zoomRange[0] / 100) * (stackedSeries.length - 1));
+    const eIdx = Math.max(sIdx + 2, Math.ceil((zoomRange[1] / 100) * stackedSeries.length));
+    return stackedSeries.slice(sIdx, eIdx);
+  }, [stackedSeries, zoomRange]);
+
+  const width = 880;
+  const height = 660;
+  const padL = 62;
+  const padR = 26;
+  const plotW = width - padL - padR;
+
+  const minT = slicedStack[0]?.t ?? 0;
+  const maxT = Math.max(minT + 1, slicedStack[slicedStack.length - 1]?.t ?? 100);
+  const toX = (t: number) => padL + ((t - minT) / (maxT - minT)) * plotW;
+
+  // Upper Deck (Master Loop TC):
+  // Track 1A: Master PV & SV (y: 28 -> 188, h=160)
+  // Track 1B: Master MV (%) & Error % (y: 212 -> 288, h=76)
+  const mPvVals = slicedStack.flatMap((p) => [p.master.simSv, p.master.simPv, p.master.actPv]);
+  const mPvMinRaw = mPvVals.length ? Math.min(...mPvVals) : 50;
+  const mPvMaxRaw = mPvVals.length ? Math.max(...mPvVals) : 90;
+  const mPvRange = Math.max(5, mPvMaxRaw - mPvMinRaw);
+  const mPvMin = mPvMinRaw - mPvRange * 0.1;
+  const mPvMax = mPvMaxRaw + mPvRange * 0.2;
+  const toMasterPvY = (v: number) => 28 + (1 - (v - mPvMin) / Math.max(1e-3, mPvMax - mPvMin)) * 160;
+
+  const mMvVals = slicedStack.flatMap((p) => [p.master.simMv, p.master.actMv]);
+  const mMvMin = Math.max(0, (mMvVals.length ? Math.min(...mMvVals) : 0) - 6);
+  const mMvMax = Math.min(105, (mMvVals.length ? Math.max(...mMvVals) : 100) + 10);
+  const toMasterMvY = (v: number) => 212 + (1 - (v - mMvMin) / Math.max(1e-3, mMvMax - mMvMin)) * 76;
+
+  // Lower Deck (Slave Loop FC):
+  // Track 2A: Slave PV & SV (y: 364 -> 524, h=160)
+  // Track 2B: Slave MV (%) & Error % (y: 548 -> 624, h=76)
+  const sPvVals = slicedStack.flatMap((p) => [p.slave.simSv, p.slave.simPv, p.slave.actPv]);
+  const sPvMinRaw = sPvVals.length ? Math.min(...sPvVals) : 120;
+  const sPvMaxRaw = sPvVals.length ? Math.max(...sPvVals) : 240;
+  const sPvRange = Math.max(10, sPvMaxRaw - sPvMinRaw);
+  const sPvMin = sPvMinRaw - sPvRange * 0.1;
+  const sPvMax = sPvMaxRaw + sPvRange * 0.2;
+  const toSlavePvY = (v: number) => 364 + (1 - (v - sPvMin) / Math.max(1e-3, sPvMax - sPvMin)) * 160;
+
+  const sMvVals = slicedStack.flatMap((p) => [p.slave.simMv, p.slave.actMv]);
+  const sMvMin = Math.max(0, (sMvVals.length ? Math.min(...sMvVals) : 0) - 6);
+  const sMvMax = Math.min(105, (sMvVals.length ? Math.max(...sMvVals) : 100) + 10);
+  const toSlaveMvY = (v: number) => 548 + (1 - (v - sMvMin) / Math.max(1e-3, sMvMax - sMvMin)) * 76;
+
+  const buildStackLine = (fnY: (pt: typeof slicedStack[number]) => number) =>
+    slicedStack.map((pt) => `${toX(pt.t).toFixed(1)},${fnY(pt).toFixed(1)}`).join(' ');
+
+  const hovered =
+    hoverIdx !== null && slicedStack[hoverIdx]
+      ? slicedStack[hoverIdx]
+      : slicedStack[slicedStack.length - 1];
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current || slicedStack.length === 0) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const relX = ((e.clientX - rect.left) / rect.width) * width;
+    const clampedX = Math.max(padL, Math.min(width - padR, relX));
+    const ratio = (clampedX - padL) / plotW;
+    const idx = Math.min(
+      slicedStack.length - 1,
+      Math.max(0, Math.round(ratio * (slicedStack.length - 1)))
+    );
+    setHoverIdx(idx);
+  };
+
+  const handleExportStackedSvg = () => {
+    if (!svgRef.current) return;
+    const svgData = new XMLSerializer().serializeToString(svgRef.current);
+    const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cascade_stacked_${masterBundle.pair.actualTag}_${slaveBundle.pair.actualTag}.svg`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  return (
+    <div
+      data-testid="master-slave-stacked-container"
+      className="border border-slate-200 bg-white rounded-lg p-4 space-y-3"
+    >
+      {/* Top Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-bold text-slate-900">
+              主副回路垂直叠放同步趋势视图 (Master {masterBundle.pair.actualTag} / Slave {slaveBundle.pair.actualTag})
+            </h3>
+            <span
+              className={`px-2 py-0.5 text-[11px] font-mono font-semibold rounded border ${
+                isDirectLinked
+                  ? 'bg-blue-50 text-blue-700 border-blue-200'
+                  : 'bg-slate-100 text-slate-700 border-slate-300'
+              }`}
+            >
+              {isDirectLinked ? 'CAS 主从拓扑已关联' : '自定义双环联立'} · R_τ={cascadeAnalysis.tauRatio}:1 · Δt={cascadeAnalysis.crossLoopLagSec}s
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 mt-0.5">
+            上层主回路 ({masterBundle.pair.name}) 与下层副回路 ({slaveBundle.pair.name}) 共享公共时间轴与同步十字游标
+          </p>
+        </div>
+
+        {/* Visibility Toggles & Export */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setShowSv(!showSv)}
+            className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+              showSv
+                ? 'bg-slate-100 text-slate-800 border-slate-300'
+                : 'bg-white text-slate-400 border-slate-200'
+            }`}
+          >
+            设定值 SV
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowSimPv(!showSimPv)}
+            className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+              showSimPv
+                ? 'bg-blue-50 text-blue-700 border-blue-200'
+                : 'bg-white text-slate-400 border-slate-200'
+            }`}
+          >
+            仿真 PV(实)
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowActPv(!showActPv)}
+            className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+              showActPv
+                ? 'bg-amber-50 text-amber-800 border-amber-200'
+                : 'bg-white text-slate-400 border-slate-200'
+            }`}
+          >
+            实测 PV(虚)
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowMvTrack(!showMvTrack)}
+            className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+              showMvTrack
+                ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
+                : 'bg-white text-slate-400 border-slate-200'
+            }`}
+          >
+            主/副阀位 MV 轨
+          </button>
+          <button
+            type="button"
+            onClick={handleExportStackedSvg}
+            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded hover:bg-slate-50"
+          >
+            <Download className="w-3.5 h-3.5" />
+            叠放 SVG
+          </button>
+        </div>
+      </div>
+
+      {/* Synchronized Master-Slave Dual-Row Crosshair Readout Bar */}
+      {hovered && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded text-xs font-mono tabular-nums">
+          <div className="lg:col-span-2 flex flex-col justify-center border-b lg:border-b-0 lg:border-r border-slate-200 pb-1.5 lg:pb-0 lg:pr-2">
+            <span className="text-[10px] text-slate-400">同步采样时刻</span>
+            <span className="font-bold text-slate-900">T+{hovered.t}s</span>
+            <span className="text-[10px] text-slate-500 truncate">{hovered.timestampLabel}</span>
+          </div>
+
+          {/* Master Loop Readout */}
+          <div className="lg:col-span-5 grid grid-cols-3 gap-2 border-b lg:border-b-0 lg:border-r border-slate-200 pb-1.5 lg:pb-0 lg:pr-2">
+            <div>
+              <span className="text-[10px] text-slate-400 block">
+                [主环] {masterBundle.pair.actualTag} PV(仿/实)
+              </span>
+              <span className="text-blue-700 font-semibold">{hovered.master.simPv.toFixed(2)}</span>
+              {' / '}
+              <span className="text-amber-700 font-semibold">{hovered.master.actPv.toFixed(2)}</span>{' '}
+              {masterBundle.pair.unit}
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-400 block">[主环] SV / 主调MV</span>
+              <span className="text-slate-800">
+                {hovered.master.actSv.toFixed(1)} / {hovered.master.actMv.toFixed(1)}%
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-400 block">[主环] 瞬时误差</span>
+              <span
+                className={`font-semibold ${
+                  hovered.master.inTolerance ? 'text-emerald-600' : 'text-rose-600'
+                }`}
+              >
+                {hovered.master.errorPvPct >= 0 ? '+' : ''}
+                {hovered.master.errorPvPct.toFixed(2)}%
+              </span>
+            </div>
+          </div>
+
+          {/* Slave Loop Readout */}
+          <div className="lg:col-span-5 grid grid-cols-3 gap-2">
+            <div>
+              <span className="text-[10px] text-slate-400 block">
+                [副环] {slaveBundle.pair.actualTag} PV(仿/实)
+              </span>
+              <span className="text-blue-700 font-semibold">{hovered.slave.simPv.toFixed(2)}</span>
+              {' / '}
+              <span className="text-amber-700 font-semibold">{hovered.slave.actPv.toFixed(2)}</span>{' '}
+              {slaveBundle.pair.unit}
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-400 block">[副环] 外给定SV / 阀位MV</span>
+              <span className="text-slate-800">
+                {hovered.slave.actSv.toFixed(1)} / {hovered.slave.actMv.toFixed(1)}%
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-400 block">[副环] 瞬时误差</span>
+              <span
+                className={`font-semibold ${
+                  hovered.slave.inTolerance ? 'text-emerald-600' : 'text-rose-600'
+                }`}
+              >
+                {hovered.slave.errorPvPct >= 0 ? '+' : ''}
+                {hovered.slave.errorPvPct.toFixed(2)}%
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Vertically Stacked Synchronized SVG Canvas */}
+      <div className="relative overflow-x-auto">
+        <svg
+          ref={svgRef}
+          data-testid="master-slave-stacked-svg"
+          viewBox={`0 0 ${width} ${height}`}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => setHoverIdx(null)}
+          className="w-full h-auto select-none cursor-crosshair bg-slate-50/40 border border-slate-200 rounded"
+        >
+          {/* ================= UPPER DECK: MASTER LOOP (TC) ================= */}
+          <text x={padL} y={18} fontSize="11" fontWeight="bold" fill="#0F172A">
+            [上层 · 主回路 Master Loop] {masterBundle.pair.actualTag} ↔ {masterBundle.pair.simTag} ({masterBundle.pair.unit}) — 归一化 RMSE={masterBundle.metrics.rmsePct.toFixed(2)}% · τ1={cascadeAnalysis.tauMasterSec}s
+          </text>
+
+          {/* Track 1A: Master PV & SV */}
+          <rect x={padL} y={28} width={plotW} height={160} fill="#FFFFFF" stroke="#CBD5E1" />
+          {[0.25, 0.5, 0.75].map((r) => (
+            <line
+              key={`m-grid-${r}`}
+              x1={padL}
+              y1={28 + r * 160}
+              x2={width - padR}
+              y2={28 + r * 160}
+              stroke="#F1F5F9"
+              strokeWidth="1"
+            />
+          ))}
+          <text x={padL - 6} y={38} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            {mPvMax.toFixed(1)}
+          </text>
+          <text x={padL - 6} y={108} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            {((mPvMax + mPvMin) / 2).toFixed(1)}
+          </text>
+          <text x={padL - 6} y={184} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            {mPvMin.toFixed(1)}
+          </text>
+
+          {showSv && (
+            <polyline
+              fill="none"
+              stroke="#64748B"
+              strokeWidth="1.4"
+              strokeDasharray="3,3"
+              points={buildStackLine((pt) => toMasterPvY(pt.master.simSv))}
+            />
+          )}
+          {showSimPv && (
+            <polyline
+              fill="none"
+              stroke="#2563EB"
+              strokeWidth="2.2"
+              points={buildStackLine((pt) => toMasterPvY(pt.master.simPv))}
+            />
+          )}
+          {showActPv && (
+            <polyline
+              fill="none"
+              stroke="#D97706"
+              strokeWidth="2"
+              strokeDasharray="6,3"
+              points={buildStackLine((pt) => toMasterPvY(pt.master.actPv))}
+            />
+          )}
+          <text x={padL + 8} y={44} fontSize="10" fontWeight="bold" fill="#334155">
+            [1A] 主调温度 PV & 设定值 SV ({masterBundle.pair.unit}) — 蓝实线: 仿真 | 橙虚线: 实测 | 灰点线: SV
+          </text>
+
+          {/* Track 1B: Master MV (%) */}
+          {showMvTrack && (
+            <g>
+              <rect x={padL} y={212} width={plotW} height={76} fill="#FFFFFF" stroke="#CBD5E1" />
+              <line
+                x1={padL}
+                y1={212 + 38}
+                x2={width - padR}
+                y2={212 + 38}
+                stroke="#F1F5F9"
+                strokeWidth="1"
+              />
+              <text x={padL - 6} y={222} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+                {mMvMax.toFixed(0)}%
+              </text>
+              <text x={padL - 6} y={284} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+                {mMvMin.toFixed(0)}%
+              </text>
+              <polyline
+                fill="none"
+                stroke="#0284C7"
+                strokeWidth="1.8"
+                points={buildStackLine((pt) => toMasterMvY(pt.master.simMv))}
+              />
+              <polyline
+                fill="none"
+                stroke="#EA580C"
+                strokeWidth="1.6"
+                strokeDasharray="5,3"
+                points={buildStackLine((pt) => toMasterMvY(pt.master.actMv))}
+              />
+              <text x={padL + 8} y={226} fontSize="10" fontWeight="bold" fill="#334155">
+                [1B] 主回路控制输出 {masterBundle.pair.actualTag}.MV (%) — 作为副回路外给定信号源
+              </text>
+            </g>
+          )}
+
+          {/* ================= CASCADE COUPLING SIGNAL BUS ================= */}
+          <rect
+            x={padL}
+            y={304}
+            width={plotW}
+            height={32}
+            rx={4}
+            fill="#EFF6FF"
+            stroke="#BFDBFE"
+          />
+          <text
+            x={padL + plotW / 2}
+            y={324}
+            textAnchor="middle"
+            fontSize="10.5"
+            fontFamily="monospace"
+            fontWeight="bold"
+            fill="#1D4ED8"
+          >
+            ▼ 串级耦合信号传递：主调 {masterBundle.pair.actualTag}.MV ──[跨环传递滞后 Δt={cascadeAnalysis.crossLoopLagSec}s · 互相关 r={cascadeAnalysis.crossLoopCorr} · 副环滞后贡献 {cascadeAnalysis.slaveLagContributionPct}%]──▶ 副调 {slaveBundle.pair.actualTag}.SV ▼
+          </text>
+
+          {/* ================= LOWER DECK: SLAVE LOOP (FC) ================= */}
+          <text x={padL} y={355} fontSize="11" fontWeight="bold" fill="#0F172A">
+            [下层 · 副回路 Slave Loop] {slaveBundle.pair.actualTag} ↔ {slaveBundle.pair.simTag} ({slaveBundle.pair.unit}) — 归一化 RMSE={slaveBundle.metrics.rmsePct.toFixed(2)}% · τ2={cascadeAnalysis.tauSlaveSec}s
+          </text>
+
+          {/* Track 2A: Slave PV & SV */}
+          <rect x={padL} y={364} width={plotW} height={160} fill="#FFFFFF" stroke="#CBD5E1" />
+          {[0.25, 0.5, 0.75].map((r) => (
+            <line
+              key={`s-grid-${r}`}
+              x1={padL}
+              y1={364 + r * 160}
+              x2={width - padR}
+              y2={364 + r * 160}
+              stroke="#F1F5F9"
+              strokeWidth="1"
+            />
+          ))}
+          <text x={padL - 6} y={374} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            {sPvMax.toFixed(1)}
+          </text>
+          <text x={padL - 6} y={444} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            {((sPvMax + sPvMin) / 2).toFixed(1)}
+          </text>
+          <text x={padL - 6} y={520} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+            {sPvMin.toFixed(1)}
+          </text>
+
+          {showSv && (
+            <polyline
+              fill="none"
+              stroke="#64748B"
+              strokeWidth="1.4"
+              strokeDasharray="3,3"
+              points={buildStackLine((pt) => toSlavePvY(pt.slave.simSv))}
+            />
+          )}
+          {showSimPv && (
+            <polyline
+              fill="none"
+              stroke="#2563EB"
+              strokeWidth="2.2"
+              points={buildStackLine((pt) => toSlavePvY(pt.slave.simPv))}
+            />
+          )}
+          {showActPv && (
+            <polyline
+              fill="none"
+              stroke="#D97706"
+              strokeWidth="2"
+              strokeDasharray="6,3"
+              points={buildStackLine((pt) => toSlavePvY(pt.slave.actPv))}
+            />
+          )}
+          <text x={padL + 8} y={380} fontSize="10" fontWeight="bold" fill="#334155">
+            [2A] 副调流量 PV & 外给定 SV ({slaveBundle.pair.unit}) — 蓝实线: 仿真 | 橙虚线: 实测 | 灰点线: SV
+          </text>
+
+          {/* Track 2B: Slave MV (%) */}
+          {showMvTrack && (
+            <g>
+              <rect x={padL} y={548} width={plotW} height={76} fill="#FFFFFF" stroke="#CBD5E1" />
+              <line
+                x1={padL}
+                y1={548 + 38}
+                x2={width - padR}
+                y2={548 + 38}
+                stroke="#F1F5F9"
+                strokeWidth="1"
+              />
+              <text x={padL - 6} y={558} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+                {sMvMax.toFixed(0)}%
+              </text>
+              <text x={padL - 6} y={620} textAnchor="end" fontSize="10" fontFamily="monospace" fill="#64748B">
+                {sMvMin.toFixed(0)}%
+              </text>
+              <polyline
+                fill="none"
+                stroke="#0284C7"
+                strokeWidth="1.8"
+                points={buildStackLine((pt) => toSlaveMvY(pt.slave.simMv))}
+              />
+              <polyline
+                fill="none"
+                stroke="#EA580C"
+                strokeWidth="1.6"
+                strokeDasharray="5,3"
+                points={buildStackLine((pt) => toSlaveMvY(pt.slave.actMv))}
+              />
+              <text x={padL + 8} y={562} fontSize="10" fontWeight="bold" fill="#334155">
+                [2B] 副回路调节阀位输出 {slaveBundle.pair.actualTag}.MV (%) — 实线: 仿真阀位 | 虚线: 实测阀位
+              </text>
+            </g>
+          )}
+
+          {/* Shared Bottom Time Axis */}
+          {[0, 0.25, 0.5, 0.75, 1].map((r) => {
+            const tVal = Math.round(minT + r * (maxT - minT));
+            const xPos = padL + r * plotW;
+            return (
+              <text
+                key={`t-tick-${r}`}
+                x={xPos}
+                y={height - 10}
+                textAnchor={r === 0 ? 'start' : r === 1 ? 'end' : 'middle'}
+                fontSize="10"
+                fontFamily="monospace"
+                fill="#475569"
+              >
+                T+{tVal}s
+              </text>
+            );
+          })}
+
+          {/* Continuous Synchronized Vertical Crosshair Across Both Stacked Loops */}
+          {hovered && (
+            <g>
+              <line
+                x1={toX(hovered.t)}
+                y1={28}
+                x2={toX(hovered.t)}
+                y2={624}
+                stroke="#0F172A"
+                strokeWidth="1.2"
+                strokeDasharray="3,3"
+              />
+              {/* Master Dots */}
+              {showSimPv && (
+                <circle
+                  cx={toX(hovered.t)}
+                  cy={toMasterPvY(hovered.master.simPv)}
+                  r={4}
+                  fill="#2563EB"
+                  stroke="#FFFFFF"
+                  strokeWidth="1.5"
+                />
+              )}
+              {showActPv && (
+                <circle
+                  cx={toX(hovered.t)}
+                  cy={toMasterPvY(hovered.master.actPv)}
+                  r={4}
+                  fill="#D97706"
+                  stroke="#FFFFFF"
+                  strokeWidth="1.5"
+                />
+              )}
+              {/* Slave Dots */}
+              {showSimPv && (
+                <circle
+                  cx={toX(hovered.t)}
+                  cy={toSlavePvY(hovered.slave.simPv)}
+                  r={4}
+                  fill="#2563EB"
+                  stroke="#FFFFFF"
+                  strokeWidth="1.5"
+                />
+              )}
+              {showActPv && (
+                <circle
+                  cx={toX(hovered.t)}
+                  cy={toSlavePvY(hovered.slave.actPv)}
+                  r={4}
+                  fill="#D97706"
+                  stroke="#FFFFFF"
+                  strokeWidth="1.5"
+                />
+              )}
+            </g>
+          )}
+        </svg>
+      </div>
+
+      {/* Synchronized Time Window Zoom & Quick Presets */}
+      <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-slate-600">主副环同步时间窗缩放：</span>
+          <button
+            type="button"
+            onClick={() => setZoomRange([0, 100])}
+            className={`px-2 py-1 rounded border font-mono ${
+              zoomRange[0] === 0 && zoomRange[1] === 100
+                ? 'bg-slate-900 text-white border-slate-900'
+                : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+            }`}
+          >
+            全窗口 (T+0~{stackedSeries[stackedSeries.length - 1]?.t ?? 399}s)
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoomRange([0, 45])}
+            className={`px-2 py-1 rounded border font-mono ${
+              zoomRange[0] === 0 && zoomRange[1] === 45
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+            }`}
+          >
+            聚焦阶跃耦合瞬态段 (0%–45%)
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoomRange([45, 100])}
+            className={`px-2 py-1 rounded border font-mono ${
+              zoomRange[0] === 45 && zoomRange[1] === 100
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+            }`}
+          >
+            聚焦稳态保持段 (45%–100%)
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 font-mono text-slate-600">
+          <span>起点 {zoomRange[0]}%</span>
+          <input
+            type="range"
+            min={0}
+            max={80}
+            step={5}
+            value={zoomRange[0]}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setZoomRange([v, Math.max(v + 20, zoomRange[1])]);
+            }}
+            aria-label="主副环同步窗口起点百分比"
+            className="w-24 accent-blue-600"
+          />
+          <span>终点 {zoomRange[1]}%</span>
+          <input
+            type="range"
+            min={20}
+            max={100}
+            step={5}
+            value={zoomRange[1]}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setZoomRange([Math.min(zoomRange[0], v - 20), v]);
+            }}
+            aria-label="主副环同步窗口终点百分比"
+            className="w-24 accent-blue-600"
+          />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+

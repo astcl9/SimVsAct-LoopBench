@@ -4,16 +4,20 @@ import {
   ArrowRight,
   CheckCircle2,
   Clock,
+  Cpu,
   Database,
   Download,
   FileSpreadsheet,
   FileText,
+  Play,
   RefreshCw,
   Upload,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
   detectEncodingAndDecode,
+  DuckDbQueryExecutionResult,
+  executeColumnarSqlAggregation,
   getLoopTypeLabel,
   parseCsvTextToDataset,
   parsePouTableRows,
@@ -53,6 +57,67 @@ export const UploadPage: React.FC<UploadPageProps> = ({
 }) => {
   const [activePreviewTab, setActivePreviewTab] = useState<'actual' | 'sim' | 'pou'>('actual');
   const [uploadStatusMsg, setUploadStatusMsg] = useState<string | null>(null);
+  const [duckScaleRows, setDuckScaleRows] = useState<number>(1_000_000);
+  const [duckBucketSec, setDuckBucketSec] = useState<number>(10);
+  const [duckLttbTarget, setDuckLttbTarget] = useState<number>(240);
+  const [duckTagFilter, setDuckTagFilter] = useState<string>('FC10901');
+  const [duckLoading, setDuckLoading] = useState<boolean>(false);
+  const [duckResult, setDuckResult] = useState<DuckDbQueryExecutionResult>(() =>
+    executeColumnarSqlAggregation({
+      totalRows: 1_000_000,
+      bucketSec: 10,
+      targetLttbPoints: 240,
+      tagFilter: 'FC10901',
+      engineMode: 'server-express-columnar',
+    })
+  );
+
+  const handleRunDuckDbQuery = async (
+    nextRows = duckScaleRows,
+    nextBucket = duckBucketSec,
+    nextLttb = duckLttbTarget,
+    nextTag = duckTagFilter
+  ) => {
+    setDuckLoading(true);
+    try {
+      const resp = await fetch('/api/duckdb/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          totalRows: nextRows,
+          bucketSec: nextBucket,
+          targetLttbPoints: nextLttb,
+          tagFilter: nextTag,
+        }),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as DuckDbQueryExecutionResult;
+        setDuckResult(data);
+      } else {
+        setDuckResult(
+          executeColumnarSqlAggregation({
+            totalRows: nextRows,
+            bucketSec: nextBucket,
+            targetLttbPoints: nextLttb,
+            tagFilter: nextTag,
+            engineMode: 'client-wasm-fallback',
+          })
+        );
+      }
+    } catch {
+      setDuckResult(
+        executeColumnarSqlAggregation({
+          totalRows: nextRows,
+          bucketSec: nextBucket,
+          targetLttbPoints: nextLttb,
+          tagFilter: nextTag,
+          engineMode: 'client-wasm-fallback',
+        })
+      );
+    } finally {
+      setDuckLoading(false);
+    }
+  };
 
   const actInputRef = useRef<HTMLInputElement | null>(null);
   const simInputRef = useRef<HTMLInputElement | null>(null);
@@ -625,6 +690,163 @@ export const UploadPage: React.FC<UploadPageProps> = ({
             </div>
           </div>
         )}
+      </div>
+
+      {/* V1.1 / V2 Capability 3: >50MB / Million-Row Server-Side DuckDB Columnar Pre-Aggregation & LTTB Streaming Console */}
+      <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-slate-200">
+          <div className="flex items-center gap-2.5">
+            <Cpu className="w-4 h-4 text-blue-600 shrink-0" />
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                超大历史库文件 (&gt;50 MB / 百万行级 Parquet·CSV) 服务端流式降采样与 DuckDB 预聚合切片接口
+              </h3>
+              <p className="text-xs text-slate-500">
+                接入全厂数月跨度秒级归档时，通过 <code className="font-mono">/api/duckdb/query</code> 执行服务端列式时间分桶 (
+                <code className="font-mono">time_bucket</code>) 与 LTTB 保峰保谷流式降采样，避免浏览器内存溢出。
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <select
+              value={duckScaleRows}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setDuckScaleRows(v);
+                handleRunDuckDbQuery(v, duckBucketSec, duckLttbTarget, duckTagFilter);
+              }}
+              aria-label="百万行历史库规模"
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded font-mono text-slate-900"
+            >
+              <option value={250000}>25万行 (~17 MB 归档)</option>
+              <option value={1000000}>100万行 (~68 MB 归档)</option>
+              <option value={2500000}>250万行 (~170 MB 归档)</option>
+            </select>
+
+            <select
+              value={duckBucketSec}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setDuckBucketSec(v);
+                handleRunDuckDbQuery(duckScaleRows, v, duckLttbTarget, duckTagFilter);
+              }}
+              aria-label="DuckDB time_bucket 聚合粒度"
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded font-mono text-slate-900"
+            >
+              <option value={5}>分桶粒度: 5s</option>
+              <option value={10}>分桶粒度: 10s</option>
+              <option value={30}>分桶粒度: 30s</option>
+            </select>
+
+            <select
+              value={duckTagFilter}
+              onChange={(e) => {
+                const v = e.target.value;
+                setDuckTagFilter(v);
+                handleRunDuckDbQuery(duckScaleRows, duckBucketSec, duckLttbTarget, v);
+              }}
+              aria-label="预聚合目标回路位号"
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded font-mono text-slate-900"
+            >
+              <option value="FC10901">位号: FC10901 (流量)</option>
+              <option value="TC11003">位号: TC11003 (温度)</option>
+            </select>
+
+            <button
+              type="button"
+              onClick={() => handleRunDuckDbQuery()}
+              disabled={duckLoading}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded transition-colors whitespace-nowrap shrink-0"
+            >
+              <Play className="w-3.5 h-3.5" />
+              {duckLoading ? '扫描中...' : '执行 DuckDB 预聚合切片'}
+            </button>
+          </div>
+        </div>
+
+        {/* SQL Query & Telemetry Strip */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+          <div className="lg:col-span-7 space-y-2.5">
+            <div className="p-3 bg-slate-900 text-slate-100 rounded-lg font-mono text-[11px] overflow-x-auto">
+              <div className="flex items-center justify-between text-slate-400 pb-1.5 mb-1.5 border-b border-slate-700">
+                <span>POST /api/duckdb/query · DuckDB Columnar SQL</span>
+                <span className="text-emerald-400">
+                  ● {duckResult.engineMode === 'server-express-columnar' ? 'Server Express API' : 'Client Columnar Engine'}
+                </span>
+              </div>
+              <code className="leading-relaxed block">{duckResult.sqlExecuted}</code>
+            </div>
+
+            {/* Telemetry KPIs */}
+            <div className="grid grid-cols-4 gap-2 text-center font-mono tabular-nums text-xs">
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                <span className="text-[10px] text-slate-400 block">扫描归档规模</span>
+                <span className="font-bold text-slate-900">
+                  {(duckResult.scannedRows / 10000).toFixed(0)}万行 ({duckResult.simulatedFileSizeMb}MB)
+                </span>
+              </div>
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                <span className="text-[10px] text-slate-400 block">预聚合压缩比</span>
+                <span className="font-bold text-blue-700">
+                  {duckResult.returnedBuckets}桶 → {duckResult.lttbPointsCount}点
+                </span>
+              </div>
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                <span className="text-[10px] text-slate-400 block">服务端执行耗时</span>
+                <span className="font-bold text-emerald-700">{duckResult.executionTimeMs} ms</span>
+              </div>
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                <span className="text-[10px] text-slate-400 block">列式扫描吞吐率</span>
+                <span className="font-bold text-slate-900">
+                  {(duckResult.throughputRowsPerSec / 1_000_000).toFixed(1)}M 行/s
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Right 5 cols: LTTB Streaming Slice Curve & Min-Max Envelope Preview */}
+          <div className="lg:col-span-5 p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-slate-900">
+                流式分桶包络 [MIN, MAX] 与 LTTB 保峰保谷降采样曲线 ({duckTagFilter})
+              </span>
+              <span className="font-mono text-slate-500">内存占用: {duckResult.memoryFootprintMb} MB</span>
+            </div>
+            {(() => {
+              const pts = duckResult.lttbSeries;
+              const w = 420;
+              const h = 115;
+              const vals = pts.flatMap((p) => [p.minPv, p.maxPv, p.sv]);
+              const minV = vals.length ? Math.min(...vals) - 2 : 0;
+              const maxV = vals.length ? Math.max(...vals) + 2 : 300;
+              const spanV = Math.max(1, maxV - minV);
+              const maxT = Math.max(1, pts[pts.length - 1]?.t || 1);
+
+              const toX = (t: number) => ((t / maxT) * (w - 20) + 10).toFixed(1);
+              const toY = (v: number) => ((1 - (v - minV) / spanV) * (h - 20) + 10).toFixed(1);
+
+              const simLine = pts.map((p) => `${toX(p.t)},${toY(p.simPv)}`).join(' ');
+              const actLine = pts.map((p) => `${toX(p.t)},${toY(p.actPv)}`).join(' ');
+              const envTop = pts.map((p) => `${toX(p.t)},${toY(p.maxPv)}`);
+              const envBot = [...pts].reverse().map((p) => `${toX(p.t)},${toY(p.minPv)}`);
+              const envPoly = [...envTop, ...envBot].join(' ');
+
+              return (
+                <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-28 bg-white border border-slate-200 rounded">
+                  {envPoly && <polygon points={envPoly} fill="#FEF3C7" fillOpacity={0.85} />}
+                  {simLine && <polyline fill="none" stroke="#2563EB" strokeWidth="1.8" points={simLine} />}
+                  {actLine && (
+                    <polyline fill="none" stroke="#D97706" strokeWidth="1.5" strokeDasharray="4,2" points={actLine} />
+                  )}
+                  <text x="14" y="16" fontSize="9.5" fontFamily="monospace" fill="#475569">
+                    黄带: 分桶 [MIN, MAX] 极值包络 · 蓝实线: 仿真均值 · 橙虚线: LTTB 实测均值
+                  </text>
+                </svg>
+              );
+            })()}
+          </div>
+        </div>
       </div>
     </div>
   );

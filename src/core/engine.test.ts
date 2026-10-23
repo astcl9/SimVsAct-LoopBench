@@ -2,16 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCanonicalNormalizedPreview,
+  computeCascadeCoupledAnalysis,
   computeClosedLoopStepMetrics,
   computeCrossCorrelationCurve,
+  computeSpectralPsdAnalysis,
   computeValveHysteresisMetrics,
   detectAutoSliceWindows,
   detectEncodingAndDecode,
   detectTableMorphology,
   estimateCrossCorrelationLag,
+  executeColumnarSqlAggregation,
   identifyProcessModelSummary,
   inferLoopTypeFromTag,
   lttbDownsample,
+  resolveMasterSlavePairBundles,
   runPairComparison,
 } from './engine';
 import { buildSamplePlatformBundle } from './sampleData';
@@ -209,5 +213,80 @@ test('B5 & C5: Field Role Mapping canonical normalized stream and FOPDT/SOPDT pr
   assert.ok(hyst.reversalCountAct >= 0);
   assert.ok(typeof hyst.stictionDiagnosis === 'string');
 });
+
+test('V1.1/V2 Capabilities: PSD Frequency Spectrum, Master-Slave Cascade Coupling, and 1M-Row DuckDB Columnar Slice', () => {
+  const bundle = buildSamplePlatformBundle(true);
+  const alignOpts = {
+    mode: 'scenario_window' as const,
+    gridSec: 1,
+    resampleMethod: 'linear' as const,
+    relativeTime: true,
+    reconstructClock1Hz: true,
+    excludeGaps: true,
+    minSegmentSec: 30,
+    autoLagEstimate: true,
+    manualLagSec: 0,
+  };
+  const tols = {
+    flowPressureRmsePct: 2.0,
+    tempLevelRmsePct: 5.0,
+    compositionRmsePct: 3.0,
+    overshootWarningPct: 15.0,
+  };
+
+  const pairResults = bundle.defaultPairs.map((pair) => {
+    const actPts = bundle.actualDataset.seriesMap[pair.actualTag];
+    const simPts = bundle.simDataset.seriesMap[pair.simKey];
+    const res = runPairComparison(
+      pair,
+      actPts,
+      simPts,
+      alignOpts,
+      tols,
+      bundle.pouDictionary.loops[pair.actualTag]
+    );
+    return { pair, ...res };
+  });
+
+  // 1. Test PSD / FFT Frequency-Domain & Robustness Analysis
+  const psd = computeSpectralPsdAnalysis(pairResults[0].alignedSeries, 1, 12.6);
+  assert.equal(psd.bins.length, 36);
+  assert.ok(psd.dominantFreqHz > 0);
+  assert.ok(psd.dominantPeriodSec > 0);
+  assert.ok(Math.abs(psd.lowFreqEnergyPct + psd.midFreqEnergyPct + psd.highFreqEnergyPct - 100) < 0.2);
+  assert.ok(psd.gainMarginDb > 0 && psd.phaseMarginDeg > 20);
+
+  // 2. Test Master-Slave Cascade Loop (TC11003 -> FC10901) Coupled Analysis
+  const cascade = computeCascadeCoupledAnalysis(pairResults);
+  assert.equal(cascade.masterTag, 'TC11003');
+  assert.equal(cascade.slaveTag, 'FC10901');
+  assert.ok(cascade.tauRatio > 1.0);
+  assert.ok(Math.abs(cascade.slaveLagContributionPct + cascade.masterModelContributionPct - 100) < 0.2);
+  assert.ok(cascade.syncedSeries.length > 100);
+
+  // 3. Test 1,000,000-Row Columnar Pre-Aggregation & LTTB Streaming Slice
+  const duck = executeColumnarSqlAggregation({
+    totalRows: 1_000_000,
+    bucketSec: 10,
+    targetLttbPoints: 240,
+    tagFilter: 'FC10901',
+  });
+  assert.equal(duck.scannedRows, 1_000_000);
+  assert.equal(duck.lttbPointsCount, 240);
+  assert.ok(duck.returnedBuckets >= 120);
+  assert.ok(duck.throughputRowsPerSec > 10_000);
+
+  // 4. Test PairItem Master-Slave Association & Vertically Stacked Synchronized Resolution
+  const resolvedFromSlave = resolveMasterSlavePairBundles(pairResults, 'pair_fc_closed');
+  assert.ok(resolvedFromSlave);
+  assert.equal(resolvedFromSlave.isDirectLinked, true);
+  assert.equal(resolvedFromSlave.masterBundle.pair.id, 'pair_tc_closed');
+  assert.equal(resolvedFromSlave.masterBundle.pair.cascadeRole, 'master');
+  assert.equal(resolvedFromSlave.slaveBundle.pair.id, 'pair_fc_closed');
+  assert.equal(resolvedFromSlave.slaveBundle.pair.cascadeRole, 'slave');
+  assert.equal(resolvedFromSlave.stackedSeries.length, 400);
+});
+
+
 
 
